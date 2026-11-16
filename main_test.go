@@ -108,3 +108,124 @@ func TestAuthAcceptsTypedAndPastedToken(t *testing.T) {
 		t.Fatalf("saved token = %q", data)
 	}
 }
+
+func TestRecentChatsSwitch(t *testing.T) {
+	m := newModel("test-token")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(*model)
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	m = updated.(*model)
+	if !m.recentOpen || !m.sessionsLoading {
+		t.Fatalf("recent chats did not open: open=%v loading=%v", m.recentOpen, m.sessionsLoading)
+	}
+	if view := m.View(); !strings.Contains(view, "Recent chats") {
+		t.Fatalf("recent view missing: %q", view)
+	}
+
+	updated, _ = m.Update(sessionsMsg{
+		seq:     m.sessionsSeq,
+		replace: true,
+		sessions: []SessionInfo{
+			{ID: "s1", Title: "First chat", UpdatedAt: 1782741816.158},
+			{ID: "s2", Title: "Second chat", UpdatedAt: 1782740000},
+		},
+	})
+	m = updated.(*model)
+	if m.sessionsLoading || len(m.sessions) != 2 || m.sessionIndex != 0 {
+		t.Fatalf("sessions not applied: %+v", m.sessions)
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	m = updated.(*model)
+	if m.sessionIndex != 1 {
+		t.Fatalf("selection = %d, want 1", m.sessionIndex)
+	}
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(*model)
+	if !m.historyLoading || m.pendingSessionID != "s2" || cmd == nil {
+		t.Fatalf("history did not start: loading=%v pending=%q cmd=%v", m.historyLoading, m.pendingSessionID, cmd)
+	}
+
+	updated, _ = m.Update(historyMsg{
+		seq:       m.historySeq,
+		sessionID: "s2",
+		history: &ChatHistory{
+			SessionID:        "s2",
+			Title:            "Second chat",
+			CurrentMessageID: 42,
+			Messages: []HistoryMessage{
+				{
+					MessageID: 40,
+					Role:      "USER",
+					Fragments: []HistoryFragment{{Type: "REQUEST", Content: "first question"}},
+				},
+				{
+					MessageID:       42,
+					Role:            "ASSISTANT",
+					Content:         "first answer",
+					ThinkingContent: "first reasoning",
+					Status:          "FINISHED",
+				},
+			},
+		},
+	})
+	m = updated.(*model)
+	if m.recentOpen || m.historyLoading {
+		t.Fatal("recent chats did not close after loading history")
+	}
+	if m.sessionID != "s2" || m.chatTitle != "Second chat" {
+		t.Fatalf("session state = %q title=%q", m.sessionID, m.chatTitle)
+	}
+	if m.parentID == nil || *m.parentID != 42 {
+		t.Fatalf("parent id = %v", m.parentID)
+	}
+	if len(m.messages) != 2 || m.messages[0].text != "first question" || m.messages[1].text != "first answer" {
+		t.Fatalf("messages = %+v", m.messages)
+	}
+	if m.messages[1].thinking != "first reasoning" {
+		t.Fatalf("thinking = %q", m.messages[1].thinking)
+	}
+	view := m.View()
+	for _, want := range []string{"first question", "first answer", "first reasoning", "Second chat"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("view missing %q: %q", want, view)
+		}
+	}
+}
+
+func TestRecentChatsDeleteCurrent(t *testing.T) {
+	m := newModel("test-token")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(*model)
+	m.recentOpen = true
+	m.sessions = []SessionInfo{{ID: "s1", Title: "First"}, {ID: "s2", Title: "Second"}}
+	m.sessionIndex = 0
+	m.sessionID = "s1"
+	m.messages = []chatMessage{{kind: msgUser, text: "hello"}}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	m = updated.(*model)
+	if !m.deleteConfirm {
+		t.Fatal("delete confirmation did not open")
+	}
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	m = updated.(*model)
+	if !m.deleting || m.pendingSessionID != "s1" || cmd == nil {
+		t.Fatalf("delete did not start: deleting=%v pending=%q", m.deleting, m.pendingSessionID)
+	}
+
+	updated, _ = m.Update(deleteSessionMsg{seq: m.deleteSeq, sessionID: "s1"})
+	m = updated.(*model)
+	if m.deleting || len(m.sessions) != 1 || m.sessions[0].ID != "s2" {
+		t.Fatalf("session not removed: %+v", m.sessions)
+	}
+	if m.sessionID != "" || len(m.messages) != 0 {
+		t.Fatalf("current chat was not reset: session=%q messages=%d", m.sessionID, len(m.messages))
+	}
+	if !m.recentOpen || m.recentNotice != "chat deleted" {
+		t.Fatalf("unexpected recent state: open=%v notice=%q", m.recentOpen, m.recentNotice)
+	}
+}

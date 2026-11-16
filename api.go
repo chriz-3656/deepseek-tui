@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -107,8 +108,16 @@ func (c *APIClient) postJSON(ctx context.Context, path string, payload any, out 
 			return err
 		}
 	}
+	return c.doJSON(ctx, http.MethodPost, path, body, out)
+}
 
-	req, err := c.newRequest(ctx, http.MethodPost, path, body)
+// getJSON performs a GET and decodes the standard DeepSeek envelope.
+func (c *APIClient) getJSON(ctx context.Context, path string, out any) error {
+	return c.doJSON(ctx, http.MethodGet, path, nil, out)
+}
+
+func (c *APIClient) doJSON(ctx context.Context, method, path string, body []byte, out any) error {
+	req, err := c.newRequest(ctx, method, path, body)
 	if err != nil {
 		return err
 	}
@@ -118,7 +127,7 @@ func (c *APIClient) postJSON(ctx context.Context, path string, payload any, out 
 	}
 	defer resp.Body.Close()
 
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
 		return err
 	}
@@ -179,6 +188,227 @@ func apiErrorFromBody(status int, body []byte) error {
 	return &APIError{Status: status, Message: msg}
 }
 
+// flexInt64 accepts both JSON numbers and numeric strings. DeepSeek's web
+// endpoints have served message ids in both encodings.
+type flexInt64 int64
+
+func (n *flexInt64) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || bytes.Equal(data, []byte("null")) {
+		*n = 0
+		return nil
+	}
+	var value int64
+	if err := json.Unmarshal(data, &value); err == nil {
+		*n = flexInt64(value)
+		return nil
+	}
+	var text string
+	if err := json.Unmarshal(data, &text); err != nil {
+		return fmt.Errorf("deepseek: invalid integer %s", data)
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
+		*n = 0
+		return nil
+	}
+	value, err := strconv.ParseInt(text, 10, 64)
+	if err != nil {
+		return fmt.Errorf("deepseek: invalid integer %q", text)
+	}
+	*n = flexInt64(value)
+	return nil
+}
+
+// flexFloat64 accepts JSON numbers and numeric strings for epoch timestamps.
+type flexFloat64 float64
+
+func (n *flexFloat64) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || bytes.Equal(data, []byte("null")) {
+		*n = 0
+		return nil
+	}
+	var value float64
+	if err := json.Unmarshal(data, &value); err == nil {
+		*n = flexFloat64(value)
+		return nil
+	}
+	var text string
+	if err := json.Unmarshal(data, &text); err != nil {
+		return fmt.Errorf("deepseek: invalid number %s", data)
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
+		*n = 0
+		return nil
+	}
+	value, err := strconv.ParseFloat(text, 64)
+	if err != nil {
+		return fmt.Errorf("deepseek: invalid number %q", text)
+	}
+	*n = flexFloat64(value)
+	return nil
+}
+
+// SessionInfo is one entry in the account's chat drawer.
+type SessionInfo struct {
+	ID         string      `json:"id"`
+	Title      string      `json:"title"`
+	Pinned     bool        `json:"pinned"`
+	UpdatedAt  flexFloat64 `json:"updated_at"`
+	InsertedAt flexFloat64 `json:"inserted_at"`
+}
+
+// SessionCursor is the fetch_page cursor. The server returns sessions
+// strictly older than this entry, newest first.
+type SessionCursor struct {
+	Pinned    bool
+	UpdatedAt float64
+}
+
+// SessionPage is one page of the chat drawer.
+type SessionPage struct {
+	Sessions []SessionInfo
+	HasMore  bool
+}
+
+// FetchSessions fetches one page of the account's chat list. A nil cursor
+// requests the first page. DeepSeek's endpoint is a GET and needs no PoW.
+func (c *APIClient) FetchSessions(ctx context.Context, cursor *SessionCursor, count int) (*SessionPage, error) {
+	if count <= 0 {
+		count = 50
+	}
+
+	values := url.Values{}
+	values.Set("count", strconv.Itoa(count))
+	if cursor != nil {
+		values.Set("lte_cursor.pinned", strconv.FormatBool(cursor.Pinned))
+		values.Set("lte_cursor.updated_at", strconv.FormatFloat(cursor.UpdatedAt, 'f', -1, 64))
+	}
+
+	var out struct {
+		ChatSessions []SessionInfo `json:"chat_sessions"`
+		Sessions     []SessionInfo `json:"sessions"`
+		HasMore      bool          `json:"has_more"`
+	}
+	if err := c.getJSON(ctx, "/chat_session/fetch_page?"+values.Encode(), &out); err != nil {
+		return nil, err
+	}
+	sessions := out.ChatSessions
+	if sessions == nil {
+		sessions = out.Sessions
+	}
+	return &SessionPage{Sessions: sessions, HasMore: out.HasMore}, nil
+}
+
+// HistoryFragment is one piece of a user or assistant message.
+type HistoryFragment struct {
+	Type        string      `json:"type"`
+	Content     string      `json:"content"`
+	ElapsedSecs flexFloat64 `json:"elapsed_secs"`
+}
+
+// HistoryMessage is one message in a server-side chat session. DeepSeek has
+// served two shapes: text in fragments[] (REQUEST/THINK/RESPONSE), and text
+// in the top-level content / thinking_content fields. Both are supported.
+type HistoryMessage struct {
+	MessageID       flexInt64         `json:"message_id"`
+	ParentID        *flexInt64        `json:"parent_id"`
+	Role            string            `json:"role"`
+	Content         string            `json:"content"`
+	ThinkingContent string            `json:"thinking_content"`
+	Status          string            `json:"status"`
+	Fragments       []HistoryFragment `json:"fragments"`
+	InsertedAt      flexFloat64       `json:"inserted_at"`
+}
+
+// ChatHistory is a session plus its complete message list. The history
+// endpoint returns the whole conversation in one response (no pagination).
+type ChatHistory struct {
+	SessionID        string
+	Title            string
+	CurrentMessageID int64
+	Messages         []HistoryMessage
+}
+
+// FetchHistory loads every message of one chat session.
+func (c *APIClient) FetchHistory(ctx context.Context, sessionID string) (*ChatHistory, error) {
+	values := url.Values{}
+	values.Set("chat_session_id", sessionID)
+
+	var out struct {
+		ChatSession struct {
+			ID               string    `json:"id"`
+			Title            string    `json:"title"`
+			CurrentMessageID flexInt64 `json:"current_message_id"`
+		} `json:"chat_session"`
+		ChatMessages     []HistoryMessage `json:"chat_messages"`
+		CurrentMessageID flexInt64        `json:"current_message_id"`
+	}
+	if err := c.getJSON(ctx, "/chat/history_messages?"+values.Encode(), &out); err != nil {
+		return nil, err
+	}
+
+	history := &ChatHistory{
+		SessionID: sessionID,
+		Title:     out.ChatSession.Title,
+		Messages:  out.ChatMessages,
+	}
+	history.CurrentMessageID = int64(out.ChatSession.CurrentMessageID)
+	if history.CurrentMessageID == 0 {
+		history.CurrentMessageID = int64(out.CurrentMessageID)
+	}
+	if history.SessionID == "" {
+		history.SessionID = out.ChatSession.ID
+	}
+	return history, nil
+}
+
+// DeleteSession removes one chat from the account.
+func (c *APIClient) DeleteSession(ctx context.Context, sessionID string) error {
+	return c.postJSON(ctx, "/chat_session/delete", map[string]string{"chat_session_id": sessionID}, nil)
+}
+
+// fragmentText joins the text of all fragments with the given type.
+func (m HistoryMessage) fragmentText(want string) string {
+	var parts []string
+	for _, fragment := range m.Fragments {
+		if !strings.EqualFold(strings.TrimSpace(fragment.Type), want) {
+			continue
+		}
+		if strings.TrimSpace(fragment.Content) == "" {
+			continue
+		}
+		parts = append(parts, fragment.Content)
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+// UserText returns the user's prompt.
+func (m HistoryMessage) UserText() string {
+	if text := m.fragmentText("REQUEST"); text != "" {
+		return text
+	}
+	return strings.TrimSpace(m.Content)
+}
+
+// AssistantText returns the assistant's visible answer.
+func (m HistoryMessage) AssistantText() string {
+	if text := m.fragmentText("RESPONSE"); text != "" {
+		return text
+	}
+	return strings.TrimSpace(m.Content)
+}
+
+// AssistantThinking returns the assistant's reasoning, if any.
+func (m HistoryMessage) AssistantThinking() string {
+	if text := m.fragmentText("THINK"); text != "" {
+		return text
+	}
+	return strings.TrimSpace(m.ThinkingContent)
+}
+
 // CreateSession opens a fresh chat session and returns its id.
 func (c *APIClient) CreateSession(ctx context.Context) (string, error) {
 	var out struct {
@@ -187,7 +417,7 @@ func (c *APIClient) CreateSession(ctx context.Context) (string, error) {
 			ID string `json:"id"`
 		} `json:"chat_session"`
 	}
-	if err := c.postJSON(ctx, "/chat_session/create", map[string]any{}, &out); err != nil {
+	if err := c.postJSON(ctx, "/chat_session/create", map[string]string{"agent": "chat"}, &out); err != nil {
 		return "", err
 	}
 	id := out.ID

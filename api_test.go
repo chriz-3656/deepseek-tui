@@ -27,6 +27,11 @@ func TestCreateSessionResponseShapes(t *testing.T) {
 				if r.URL.Path != "/chat_session/create" {
 					t.Errorf("path = %s", r.URL.Path)
 				}
+				var payload map[string]any
+				_ = json.NewDecoder(r.Body).Decode(&payload)
+				if payload["agent"] != "chat" {
+					t.Errorf("agent = %v, want chat", payload["agent"])
+				}
 				w.Header().Set("Content-Type", "application/json")
 				fmt.Fprint(w, tc.body)
 			}))
@@ -204,5 +209,150 @@ func TestReadSSEErrorEvent(t *testing.T) {
 	err := readSSE(strings.NewReader(input), parser.handle)
 	if err == nil || !strings.Contains(err.Error(), "bad session") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestFetchSessionsPage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %s", r.Method)
+		}
+		if r.URL.Path != "/chat_session/fetch_page" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Errorf("authorization = %q", got)
+		}
+		query := r.URL.Query()
+		if got := query.Get("count"); got != "50" {
+			t.Errorf("count = %q", got)
+		}
+		if got := query.Get("lte_cursor.pinned"); got != "true" {
+			t.Errorf("pinned cursor = %q", got)
+		}
+		if got := query.Get("lte_cursor.updated_at"); got != "1782741816.158" {
+			t.Errorf("updated cursor = %q", got)
+		}
+		fmt.Fprint(w, `{"code":0,"msg":"","data":{"biz_code":0,"biz_data":{"chat_sessions":[{"id":"s1","title":"First chat","pinned":true,"updated_at":1782741816.158},{"id":"s2","title":null,"pinned":false,"updated_at":"1782740000"}],"has_more":true}}}`)
+	}))
+	defer server.Close()
+
+	client := NewAPIClient("test-token")
+	client.baseURL = server.URL
+	page, err := client.FetchSessions(context.Background(), &SessionCursor{Pinned: true, UpdatedAt: 1782741816.158}, 50)
+	if err != nil {
+		t.Fatalf("fetch sessions: %v", err)
+	}
+	if !page.HasMore {
+		t.Fatal("has_more was not decoded")
+	}
+	if len(page.Sessions) != 2 {
+		t.Fatalf("sessions = %d", len(page.Sessions))
+	}
+	if page.Sessions[0].ID != "s1" || page.Sessions[0].Title != "First chat" || !page.Sessions[0].Pinned {
+		t.Fatalf("unexpected first session: %+v", page.Sessions[0])
+	}
+	if page.Sessions[0].UpdatedAt != flexFloat64(1782741816.158) {
+		t.Fatalf("updated_at = %v", page.Sessions[0].UpdatedAt)
+	}
+	if page.Sessions[1].Title != "" {
+		t.Fatalf("null title = %q", page.Sessions[1].Title)
+	}
+	if page.Sessions[1].UpdatedAt != flexFloat64(1782740000) {
+		t.Fatalf("string updated_at = %v", page.Sessions[1].UpdatedAt)
+	}
+}
+
+func TestFetchSessionsFirstPage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		if query.Has("lte_cursor.pinned") || query.Has("lte_cursor.updated_at") {
+			t.Errorf("first page carried a cursor: %s", r.URL.RawQuery)
+		}
+		fmt.Fprint(w, `{"code":0,"data":{"biz_data":{"chat_sessions":[],"has_more":false}}}`)
+	}))
+	defer server.Close()
+
+	client := NewAPIClient("test-token")
+	client.baseURL = server.URL
+	page, err := client.FetchSessions(context.Background(), nil, 0)
+	if err != nil {
+		t.Fatalf("fetch sessions: %v", err)
+	}
+	if page.HasMore || len(page.Sessions) != 0 {
+		t.Fatalf("unexpected page: %+v", page)
+	}
+}
+
+func TestFetchHistoryDualShape(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %s", r.Method)
+		}
+		if r.URL.Path != "/chat/history_messages" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("chat_session_id"); got != "session-1" {
+			t.Errorf("chat_session_id = %q", got)
+		}
+		fmt.Fprint(w, `{"code":0,"msg":"","data":{"biz_code":0,"biz_data":{"chat_session":{"id":"session-1","title":"Old chat","current_message_id":42},"chat_messages":[{"message_id":40,"role":"USER","content":"","fragments":[{"type":"REQUEST","content":"first question"}]},{"message_id":41,"parent_id":40,"role":"ASSISTANT","fragments":[{"type":"THINK","content":"first reasoning"},{"type":"RESPONSE","content":"first answer"}]},{"message_id":"42","parent_id":41,"role":"ASSISTANT","content":"second answer","thinking_content":"second reasoning","status":"FINISHED"}]}}}`)
+	}))
+	defer server.Close()
+
+	client := NewAPIClient("test-token")
+	client.baseURL = server.URL
+	history, err := client.FetchHistory(context.Background(), "session-1")
+	if err != nil {
+		t.Fatalf("fetch history: %v", err)
+	}
+	if history.SessionID != "session-1" || history.Title != "Old chat" {
+		t.Fatalf("unexpected history header: %+v", history)
+	}
+	if history.CurrentMessageID != 42 {
+		t.Fatalf("current_message_id = %d", history.CurrentMessageID)
+	}
+	if len(history.Messages) != 3 {
+		t.Fatalf("messages = %d", len(history.Messages))
+	}
+	if got := history.Messages[0].UserText(); got != "first question" {
+		t.Fatalf("user text = %q", got)
+	}
+	if got := history.Messages[1].AssistantText(); got != "first answer" {
+		t.Fatalf("assistant text = %q", got)
+	}
+	if got := history.Messages[1].AssistantThinking(); got != "first reasoning" {
+		t.Fatalf("assistant thinking = %q", got)
+	}
+	if got := history.Messages[2].AssistantText(); got != "second answer" {
+		t.Fatalf("content fallback text = %q", got)
+	}
+	if got := history.Messages[2].AssistantThinking(); got != "second reasoning" {
+		t.Fatalf("thinking_content fallback = %q", got)
+	}
+	if int64(history.Messages[2].MessageID) != 42 {
+		t.Fatalf("string message_id = %d", history.Messages[2].MessageID)
+	}
+}
+
+func TestDeleteSession(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat_session/delete" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		var payload map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode payload: %v", err)
+		}
+		if payload["chat_session_id"] != "session-1" {
+			t.Errorf("chat_session_id = %q", payload["chat_session_id"])
+		}
+		fmt.Fprint(w, `{"code":0,"msg":"","data":{"biz_code":0,"biz_data":{}}}`)
+	}))
+	defer server.Close()
+
+	client := NewAPIClient("test-token")
+	client.baseURL = server.URL
+	if err := client.DeleteSession(context.Background(), "session-1"); err != nil {
+		t.Fatalf("delete session: %v", err)
 	}
 }

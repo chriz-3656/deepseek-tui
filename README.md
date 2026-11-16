@@ -30,6 +30,10 @@ enter send · ctrl+n new chat · pgup/pgdown scroll · ctrl+c quit
   and the newer fragment/snapshot protocol, including `THINK` fragments.
 - Multi-turn sessions with `parent_message_id` tracking and `model_type`
   handling for the first turn.
+- Recent-chats drawer: lists the account's server-side sessions, restores a
+  selected chat's full history (including reasoning), keeps multi-turn
+  continuation working, supports pagination, and can delete a chat with
+  confirmation.
 - Token discovery from `DEEPSEEK_TOKEN`, then `~/.config/deepseek.token`, with
   a `--token` bypass and an in-TUI token screen that supports typing and
   bracketed paste.
@@ -82,17 +86,22 @@ Or skip the token screen entirely:
 
 | Key | Action |
 | --- | --- |
-| `enter` | send the current message / save the token |
+| `enter` | send the current message / save the token / open the selected chat |
+| `ctrl+r` | open recent chats |
 | `ctrl+n` | start a new chat session |
 | `ctrl+t` | change the DeepSeek token |
-| `pgup` / `pgdown` | scroll history |
-| `up` / `down` | scroll history |
-| `home` / `end` | jump to top / bottom |
+| `pgup` / `pgdown` | scroll history (chat) / move by a page (recent chats) |
+| `up` / `down` | scroll history (chat) / select a chat (recent chats) |
+| `home` / `end` | jump to top / bottom (chat) / first / last chat (recent chats) |
+| `esc` | close recent chats |
 | `ctrl+c` | quit |
+
+Inside recent chats: `r` refreshes the list, `l` loads the next page, `n`
+starts a new chat, and `d` deletes the selected chat after `y` confirmation.
 
 ## API flow
 
-1. `POST /api/v0/chat_session/create` with `{}` → session id.
+1. `POST /api/v0/chat_session/create` with `{"agent":"chat"}` → session id.
 2. `POST /api/v0/chat/create_pow_challenge` with
    `{"target_path":"/api/v0/chat/completion"}` → salt, `expire_at`,
    difficulty, challenge digest, signature.
@@ -105,6 +114,18 @@ Or skip the token screen entirely:
 6. Parse the SSE stream. `THINK` fragments render dim and italic; `RESPONSE`
    fragments render as the assistant reply. `response_message_id` from the
    `ready` event becomes the next turn's `parent_message_id`.
+
+Recent chats use three additional web endpoints:
+
+- `GET /api/v0/chat_session/fetch_page?count=50` — newest sessions first;
+  follow `has_more` with `lte_cursor.pinned` and `lte_cursor.updated_at` for
+  older pages.
+- `GET /api/v0/chat/history_messages?chat_session_id=<id>` — the complete
+  message list plus `chat_session.current_message_id`, which becomes the next
+  turn's `parent_message_id`. Both payload shapes are supported: text in
+  `fragments[]` (`REQUEST` / `THINK` / `RESPONSE`) and text in top-level
+  `content` / `thinking_content`.
+- `POST /api/v0/chat_session/delete` with `{"chat_session_id":"<id>"}`.
 
 The browser headers (`x-client-version`, `x-client-platform`, bundle id,
 locale, timezone offset, device id, Firefox user agent) are set on every

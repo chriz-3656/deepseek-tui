@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -24,11 +25,11 @@ var version = "dev"
 // -----------------------------------------------------------------------------
 
 var (
-	accentColor = lipgloss.AdaptiveColor{Light: "#1D4ED8", Dark: "#7AA2F7"}
-	readyColor  = lipgloss.AdaptiveColor{Light: "#15803D", Dark: "#9ECE6A"}
+	accentColor  = lipgloss.AdaptiveColor{Light: "#1D4ED8", Dark: "#7AA2F7"}
+	readyColor   = lipgloss.AdaptiveColor{Light: "#15803D", Dark: "#9ECE6A"}
 	workingColor = lipgloss.AdaptiveColor{Light: "#B45309", Dark: "#E0AF68"}
-	errorColor  = lipgloss.AdaptiveColor{Light: "#B91C1C", Dark: "#F7768E"}
-	mutedColor  = lipgloss.AdaptiveColor{Light: "#6B7280", Dark: "#737AA2"}
+	errorColor   = lipgloss.AdaptiveColor{Light: "#B91C1C", Dark: "#F7768E"}
+	mutedColor   = lipgloss.AdaptiveColor{Light: "#6B7280", Dark: "#737AA2"}
 
 	titleStyle     = lipgloss.NewStyle().Bold(true).Foreground(accentColor)
 	userLabelStyle = lipgloss.NewStyle().Bold(true).Foreground(accentColor)
@@ -87,6 +88,28 @@ type streamEvent struct {
 	total     int64
 }
 
+type sessionsMsg struct {
+	sessions []SessionInfo
+	hasMore  bool
+	cursor   *SessionCursor
+	replace  bool
+	seq      int
+	err      error
+}
+
+type historyMsg struct {
+	sessionID string
+	history   *ChatHistory
+	seq       int
+	err       error
+}
+
+type deleteSessionMsg struct {
+	sessionID string
+	seq       int
+	err       error
+}
+
 type model struct {
 	token      string
 	client     *APIClient
@@ -103,7 +126,24 @@ type model struct {
 
 	messages  []chatMessage
 	sessionID string
+	chatTitle string
 	parentID  *int64
+
+	recentOpen       bool
+	sessions         []SessionInfo
+	sessionIndex     int
+	sessionsCursor   *SessionCursor
+	sessionsHasMore  bool
+	sessionsLoading  bool
+	sessionsError    string
+	recentNotice     string
+	historyLoading   bool
+	pendingSessionID string
+	deleteConfirm    bool
+	deleting         bool
+	sessionsSeq      int
+	historySeq       int
+	deleteSeq        int
 
 	streaming   bool
 	status      string
@@ -131,16 +171,16 @@ func newModel(token string) *model {
 	spin.Style = lipgloss.NewStyle().Foreground(accentColor)
 
 	m := &model{
-		token:      token,
-		configPath: tokenPath(),
-		events:     make(chan streamEvent, 1024),
-		viewport:   viewport.New(0, 0),
-		input:      input,
-		authInput:  authInput,
-		spinner:    spin,
-		status:     "ready",
+		token:       token,
+		configPath:  tokenPath(),
+		events:      make(chan streamEvent, 1024),
+		viewport:    viewport.New(0, 0),
+		input:       input,
+		authInput:   authInput,
+		spinner:     spin,
+		status:      "ready",
 		statusLevel: statusIdle,
-		authMode:   token == "",
+		authMode:    token == "",
 	}
 	if token != "" {
 		m.client = NewAPIClient(token)
@@ -180,9 +220,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.authMode {
 			return m.updateAuth(msg)
 		}
+		if m.recentOpen {
+			return m.updateRecent(msg)
+		}
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
+		case "ctrl+r":
+			if m.streaming {
+				return m, nil
+			}
+			return m, m.openRecent()
 		case "ctrl+t":
 			if !m.streaming {
 				m.beginAuth()
@@ -217,7 +265,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				SessionID:       m.sessionID,
 				ParentMessageID: m.parentID,
 				Prompt:          prompt,
-				FirstTurn:       m.sessionID == "",
+				FirstTurn:       m.parentID == nil,
 			}
 			return m, tea.Batch(m.runCompletion(req), m.spinner.Tick, waitForEvent(m.events))
 		case "pgup", "pgdown", "up", "down", "home", "end":
@@ -230,12 +278,24 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case spinner.TickMsg:
-		if !m.streaming {
+		if !m.streaming && !m.sessionsLoading && !m.historyLoading && !m.deleting {
 			return m, nil
 		}
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		return m, cmd
+
+	case sessionsMsg:
+		m.handleSessions(msg)
+		return m, nil
+
+	case historyMsg:
+		m.handleHistory(msg)
+		return m, nil
+
+	case deleteSessionMsg:
+		m.handleDelete(msg)
+		return m, nil
 
 	case streamEvent:
 		m.handleStreamEvent(msg)
@@ -261,16 +321,23 @@ func (m *model) View() string {
 	if m.authMode {
 		return m.authView()
 	}
+	if m.recentOpen {
+		return m.recentView()
+	}
 
 	header := m.headerView(m.status, m.streaming)
 	inputLine := lipgloss.NewStyle().Foreground(accentColor).Render("› ") + m.input.View()
-	help := helpStyle.Render("enter send · ctrl+n new chat · ctrl+t token · pgup/pgdown scroll · ctrl+c quit")
+	help := helpStyle.Render("enter send · ctrl+r chats · ctrl+n new chat · ctrl+t token · ctrl+c quit")
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, m.viewport.View(), inputLine, help)
 }
 
 func (m *model) headerView(status string, showSpinner bool) string {
 	left := titleStyle.Render("◆ deepseek-tui")
+	if m.chatTitle != "" {
+		titleWidth := max(6, min(40, m.width/2))
+		left += helpStyle.Render(" · " + truncateText(m.chatTitle, titleWidth))
+	}
 	if showSpinner {
 		status = m.spinner.View() + " " + status
 	}
@@ -312,6 +379,185 @@ func (m *model) authView() string {
 	return lipgloss.JoinVertical(lipgloss.Left, m.headerView(m.status, false), body, help)
 }
 
+func (m *model) recentView() string {
+	header := m.headerView(m.status, m.sessionsLoading || m.historyLoading || m.deleting)
+	bodyHeight := max(5, m.viewport.Height+1)
+	body := lipgloss.Place(m.width, bodyHeight, lipgloss.Center, lipgloss.Center, m.recentPanel())
+	help := helpStyle.Render("↑/↓ select · enter open · n new chat · d delete · r refresh · esc close")
+	return lipgloss.JoinVertical(lipgloss.Left, header, body, help)
+}
+
+func (m *model) recentRows() int {
+	return max(1, max(5, m.viewport.Height+1)-8)
+}
+
+func (m *model) recentPanel() string {
+	width := max(14, min(72, m.width-8))
+	lines := make([]string, 0, m.recentRows()+6)
+
+	title := truncateText("Recent chats", max(4, width-10))
+	count := fmt.Sprintf("%d", len(m.sessions))
+	gap := max(1, width-lipgloss.Width(title)-lipgloss.Width(count))
+	lines = append(lines, titleStyle.Render(title)+strings.Repeat(" ", gap)+helpStyle.Render(count))
+	lines = append(lines, "")
+
+	if len(m.sessions) == 0 {
+		if m.sessionsLoading {
+			lines = append(lines, helpStyle.Render("loading chats…"))
+		} else {
+			lines = append(lines, helpStyle.Render("No chats yet."))
+		}
+	} else {
+		rows := m.recentRows()
+		start := 0
+		if m.sessionIndex >= rows {
+			start = m.sessionIndex - rows + 1
+		}
+		end := min(len(m.sessions), start+rows)
+		for i := start; i < end; i++ {
+			lines = append(lines, m.sessionRowView(m.sessions[i], i == m.sessionIndex, width))
+		}
+	}
+
+	if footer := m.recentFooter(); footer != "" {
+		lines = append(lines, "", footer)
+	}
+
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(accentColor).
+		Padding(1, 2).
+		Width(width).
+		Render(strings.Join(lines, "\n"))
+}
+
+func (m *model) recentFooter() string {
+	switch {
+	case m.deleteConfirm:
+		name := "this chat"
+		if len(m.sessions) > 0 {
+			name = "“" + sessionTitle(m.sessions[m.sessionIndex]) + "”"
+		}
+		limit := max(12, min(72, m.width-8)-2)
+		return errorStyle.Render("Delete " + truncateText(name, max(8, limit-28)) + "? y confirm · n cancel")
+	case m.sessionsError != "":
+		return errorStyle.Render(truncateText(m.sessionsError, max(10, min(72, m.width-12))))
+	case m.historyLoading:
+		return m.spinner.View() + " opening chat…"
+	case m.deleting:
+		return m.spinner.View() + " deleting chat…"
+	case m.sessionsLoading && len(m.sessions) > 0:
+		return m.spinner.View() + " refreshing chats…"
+	case m.recentNotice != "":
+		return readyStyle.Render(m.recentNotice)
+	case m.sessionsHasMore:
+		return helpStyle.Render("l load more")
+	}
+	return ""
+}
+
+func (m *model) sessionRowView(session SessionInfo, selected bool, width int) string {
+	prefixPlain := "  "
+	if selected {
+		prefixPlain = "▸ "
+	}
+	marker := " "
+	markerStyle := helpStyle
+	switch {
+	case session.ID == m.sessionID:
+		marker = "●"
+		markerStyle = readyStyle
+	case session.Pinned:
+		marker = "◆"
+		markerStyle = cursorStyle
+	}
+	prefix := prefixPlain + markerStyle.Render(marker) + " "
+
+	title := sessionTitle(session)
+	stamp := ""
+	if width >= 30 {
+		stamp = relativeTime(float64(session.UpdatedAt))
+	}
+	titleWidth := width - lipgloss.Width(prefix) - lipgloss.Width(stamp)
+	if stamp != "" {
+		titleWidth -= 2
+	}
+	title = truncateText(title, max(4, titleWidth))
+	titleStyled := title
+	if selected {
+		titleStyled = lipgloss.NewStyle().Foreground(accentColor).Bold(true).Render(title)
+	}
+
+	gap := width - lipgloss.Width(prefix) - lipgloss.Width(title) - lipgloss.Width(stamp)
+	if gap < 1 {
+		gap = 1
+	}
+	line := prefix + titleStyled + strings.Repeat(" ", gap)
+	if stamp != "" {
+		line += helpStyle.Render(stamp)
+	}
+	return line
+}
+
+func sessionTitle(session SessionInfo) string {
+	title := strings.TrimSpace(session.Title)
+	if title == "" {
+		return "untitled chat"
+	}
+	return title
+}
+
+func relativeTime(epoch float64) string {
+	if epoch <= 0 {
+		return ""
+	}
+	timestamp := time.Unix(int64(epoch), 0)
+	now := time.Now()
+	if timestamp.After(now.Add(time.Minute)) {
+		return "now"
+	}
+	age := now.Sub(timestamp)
+	switch {
+	case age < time.Minute:
+		return "now"
+	case age < time.Hour:
+		return fmt.Sprintf("%dm", int(age.Minutes()))
+	case age < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(age.Hours()))
+	case age < 7*24*time.Hour:
+		return fmt.Sprintf("%dd", int(age.Hours()/24))
+	case timestamp.Year() == now.Year():
+		return timestamp.Format("Jan 2")
+	default:
+		return timestamp.Format("Jan 2 2006")
+	}
+}
+
+func truncateText(text string, width int) string {
+	text = strings.ReplaceAll(text, "\n", " ")
+	text = strings.ReplaceAll(text, "\r", " ")
+	if width <= 0 {
+		return ""
+	}
+	if lipgloss.Width(text) <= width {
+		return text
+	}
+	if width == 1 {
+		return "…"
+	}
+	var out strings.Builder
+	used := 0
+	for _, r := range text {
+		rw := lipgloss.Width(string(r))
+		if used+rw > width-1 {
+			break
+		}
+		out.WriteRune(r)
+		used += rw
+	}
+	return out.String() + "…"
+}
+
 func (m *model) statusStyle() lipgloss.Style {
 	switch m.statusLevel {
 	case statusWorking:
@@ -324,8 +570,10 @@ func (m *model) statusStyle() lipgloss.Style {
 }
 
 func (m *model) newChat() {
+	m.closeRecent()
 	m.messages = nil
 	m.sessionID = ""
+	m.chatTitle = ""
 	m.parentID = nil
 	m.streaming = false
 	m.powPercent = 0
@@ -333,6 +581,447 @@ func (m *model) newChat() {
 	m.statusLevel = statusIdle
 	m.viewport.SetContent("")
 	m.renderChat(false)
+}
+
+// closeRecent leaves the recent-chats screen and invalidates any in-flight
+// list/history/delete replies.
+func (m *model) closeRecent() {
+	m.recentOpen = false
+	m.sessionsLoading = false
+	m.historyLoading = false
+	m.deleting = false
+	m.deleteConfirm = false
+	m.pendingSessionID = ""
+	m.sessionsError = ""
+	m.recentNotice = ""
+	m.sessionsSeq++
+	m.historySeq++
+	m.deleteSeq++
+	_ = m.input.Focus()
+	if !m.streaming {
+		m.status = "ready"
+		m.statusLevel = statusIdle
+	}
+}
+
+// openRecent shows the chat drawer and refreshes its first page. The previous
+// list stays visible while the refresh runs.
+func (m *model) openRecent() tea.Cmd {
+	if m.client == nil {
+		return nil
+	}
+	m.recentOpen = true
+	m.sessionsError = ""
+	m.recentNotice = ""
+	m.deleteConfirm = false
+	m.deleting = false
+	m.pendingSessionID = ""
+	m.historyLoading = false
+	m.sessionsLoading = true
+	m.input.Blur()
+	m.status = "loading chats…"
+	m.statusLevel = statusWorking
+	m.selectCurrentSession()
+	m.sessionsSeq++
+	seq := m.sessionsSeq
+	return tea.Batch(m.loadSessions(true, seq), m.spinner.Tick)
+}
+
+func (m *model) selectCurrentSession() {
+	if m.sessionID != "" {
+		for i := range m.sessions {
+			if m.sessions[i].ID == m.sessionID {
+				m.sessionIndex = i
+				return
+			}
+		}
+	}
+	m.clampSessionIndex()
+}
+
+func (m *model) clampSessionIndex() {
+	if len(m.sessions) == 0 {
+		m.sessionIndex = 0
+		return
+	}
+	if m.sessionIndex < 0 {
+		m.sessionIndex = 0
+	}
+	if m.sessionIndex >= len(m.sessions) {
+		m.sessionIndex = len(m.sessions) - 1
+	}
+}
+
+func (m *model) moveSession(delta int) {
+	if len(m.sessions) == 0 {
+		return
+	}
+	m.sessionIndex += delta
+	m.clampSessionIndex()
+}
+
+func (m *model) updateRecent(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "ctrl+c" {
+		return m, tea.Quit
+	}
+
+	if m.deleteConfirm {
+		switch msg.String() {
+		case "y":
+			if len(m.sessions) == 0 || m.deleting {
+				return m, nil
+			}
+			target := m.sessions[m.sessionIndex]
+			m.deleteConfirm = false
+			m.deleting = true
+			m.pendingSessionID = target.ID
+			m.sessionsError = ""
+			m.recentNotice = ""
+			m.status = "deleting chat…"
+			m.statusLevel = statusWorking
+			m.deleteSeq++
+			seq := m.deleteSeq
+			return m, tea.Batch(m.loadDelete(target.ID, seq), m.spinner.Tick)
+		case "n", "esc":
+			m.deleteConfirm = false
+			return m, nil
+		}
+		return m, nil
+	}
+
+	switch msg.String() {
+	case "esc":
+		m.closeRecent()
+		return m, nil
+	case "ctrl+t":
+		m.closeRecent()
+		m.beginAuth()
+		return m, textinput.Blink
+	case "ctrl+n", "n":
+		m.newChat()
+		return m, textinput.Blink
+	}
+
+	if m.historyLoading || m.deleting {
+		return m, nil
+	}
+
+	switch msg.String() {
+	case "up", "k":
+		m.moveSession(-1)
+	case "down", "j":
+		m.moveSession(1)
+	case "pgup":
+		m.moveSession(-max(1, m.recentRows()))
+	case "pgdown":
+		m.moveSession(max(1, m.recentRows()))
+	case "home":
+		m.sessionIndex = 0
+	case "end":
+		if len(m.sessions) > 0 {
+			m.sessionIndex = len(m.sessions) - 1
+		}
+	case "r":
+		if !m.sessionsLoading {
+			m.sessionsLoading = true
+			m.sessionsError = ""
+			m.recentNotice = ""
+			m.status = "loading chats…"
+			m.statusLevel = statusWorking
+			m.sessionsSeq++
+			seq := m.sessionsSeq
+			return m, tea.Batch(m.loadSessions(true, seq), m.spinner.Tick)
+		}
+	case "l":
+		if m.sessionsHasMore && !m.sessionsLoading && m.sessionsCursor != nil {
+			m.sessionsLoading = true
+			m.sessionsError = ""
+			m.recentNotice = ""
+			m.status = "loading more chats…"
+			m.statusLevel = statusWorking
+			m.sessionsSeq++
+			seq := m.sessionsSeq
+			return m, tea.Batch(m.loadSessions(false, seq), m.spinner.Tick)
+		}
+	case "enter":
+		if len(m.sessions) == 0 {
+			return m, nil
+		}
+		selected := m.sessions[m.sessionIndex]
+		if selected.ID == m.sessionID {
+			m.closeRecent()
+			return m, nil
+		}
+		m.historyLoading = true
+		m.pendingSessionID = selected.ID
+		m.sessionsError = ""
+		m.recentNotice = ""
+		m.status = "opening chat…"
+		m.statusLevel = statusWorking
+		m.historySeq++
+		seq := m.historySeq
+		return m, tea.Batch(m.loadHistory(selected.ID, seq), m.spinner.Tick)
+	case "d":
+		if len(m.sessions) > 0 {
+			m.deleteConfirm = true
+			m.sessionsError = ""
+			m.recentNotice = ""
+		}
+	}
+	return m, nil
+}
+
+func (m *model) loadSessions(replace bool, seq int) tea.Cmd {
+	client := m.client
+	if client == nil {
+		return nil
+	}
+	var cursor *SessionCursor
+	if !replace {
+		cursor = m.sessionsCursor
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		page, err := client.FetchSessions(ctx, cursor, 50)
+		if err != nil {
+			return sessionsMsg{seq: seq, replace: replace, cursor: cursor, err: err}
+		}
+		return sessionsMsg{
+			sessions: page.Sessions,
+			hasMore:  page.HasMore,
+			cursor:   cursor,
+			replace:  replace,
+			seq:      seq,
+		}
+	}
+}
+
+func (m *model) loadHistory(sessionID string, seq int) tea.Cmd {
+	client := m.client
+	if client == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		history, err := client.FetchHistory(ctx, sessionID)
+		return historyMsg{sessionID: sessionID, history: history, seq: seq, err: err}
+	}
+}
+
+func (m *model) loadDelete(sessionID string, seq int) tea.Cmd {
+	client := m.client
+	if client == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		return deleteSessionMsg{sessionID: sessionID, seq: seq, err: client.DeleteSession(ctx, sessionID)}
+	}
+}
+
+func (m *model) handleSessions(msg sessionsMsg) {
+	if msg.seq != m.sessionsSeq || !m.recentOpen {
+		return
+	}
+	m.sessionsLoading = false
+	if msg.err != nil {
+		m.sessionsError = friendlyError(msg.err)
+		m.status = "chats error"
+		m.statusLevel = statusError
+		return
+	}
+
+	selectedID := ""
+	if m.sessionIndex >= 0 && m.sessionIndex < len(m.sessions) {
+		selectedID = m.sessions[m.sessionIndex].ID
+	}
+	if msg.replace {
+		m.sessions = dedupeSessions(msg.sessions)
+	} else {
+		m.sessions = dedupeSessions(append(m.sessions, msg.sessions...))
+	}
+
+	if selectedID != "" {
+		m.sessionIndex = -1
+		for i := range m.sessions {
+			if m.sessions[i].ID == selectedID {
+				m.sessionIndex = i
+				break
+			}
+		}
+		if m.sessionIndex < 0 {
+			m.selectCurrentSession()
+		}
+	} else {
+		m.selectCurrentSession()
+	}
+	m.clampSessionIndex()
+
+	next := sessionCursorAfter(msg.sessions, msg.hasMore)
+	if next != nil && msg.cursor != nil && next.Pinned == msg.cursor.Pinned && next.UpdatedAt == msg.cursor.UpdatedAt {
+		next = nil
+	}
+	m.sessionsCursor = next
+	m.sessionsHasMore = next != nil
+	m.sessionsError = ""
+	if m.historyLoading || m.deleting {
+		return
+	}
+	if len(m.sessions) == 0 {
+		m.status = "no chats"
+		m.statusLevel = statusIdle
+		return
+	}
+	m.status = fmt.Sprintf("%d chats", len(m.sessions))
+	m.statusLevel = statusIdle
+}
+
+func (m *model) handleHistory(msg historyMsg) {
+	if msg.seq != m.historySeq || !m.recentOpen {
+		return
+	}
+	m.historyLoading = false
+	m.pendingSessionID = ""
+	if msg.err != nil {
+		m.sessionsError = friendlyError(msg.err)
+		m.status = "chat error"
+		m.statusLevel = statusError
+		return
+	}
+	if msg.history == nil {
+		m.sessionsError = "deepseek: empty history response"
+		m.status = "chat error"
+		m.statusLevel = statusError
+		return
+	}
+
+	m.messages = historyToChatMessages(msg.history)
+	m.sessionID = msg.sessionID
+	m.chatTitle = msg.history.Title
+	m.parentID = historyParentID(msg.history)
+	m.streaming = false
+	m.powPercent = 0
+	m.recentOpen = false
+	m.deleteConfirm = false
+	m.sessionsError = ""
+	m.recentNotice = ""
+	m.status = "ready"
+	m.statusLevel = statusIdle
+	_ = m.input.Focus()
+	m.renderChat(true)
+}
+
+func (m *model) handleDelete(msg deleteSessionMsg) {
+	if msg.seq != m.deleteSeq || !m.recentOpen {
+		return
+	}
+	m.deleting = false
+	m.pendingSessionID = ""
+	if msg.err != nil {
+		m.sessionsError = friendlyError(msg.err)
+		m.status = "delete failed"
+		m.statusLevel = statusError
+		return
+	}
+
+	for i := range m.sessions {
+		if m.sessions[i].ID == msg.sessionID {
+			m.sessions = append(m.sessions[:i], m.sessions[i+1:]...)
+			break
+		}
+	}
+	if msg.sessionID == m.sessionID {
+		m.messages = nil
+		m.sessionID = ""
+		m.chatTitle = ""
+		m.parentID = nil
+		m.streaming = false
+		m.powPercent = 0
+		m.viewport.SetContent("")
+		m.renderChat(false)
+	}
+	m.clampSessionIndex()
+	m.sessionsError = ""
+	m.recentNotice = "chat deleted"
+	m.status = "chat deleted"
+	m.statusLevel = statusIdle
+}
+
+func dedupeSessions(sessions []SessionInfo) []SessionInfo {
+	seen := make(map[string]bool, len(sessions))
+	out := make([]SessionInfo, 0, len(sessions))
+	for _, session := range sessions {
+		if session.ID == "" || seen[session.ID] {
+			continue
+		}
+		seen[session.ID] = true
+		out = append(out, session)
+	}
+	return out
+}
+
+func sessionCursorAfter(sessions []SessionInfo, hasMore bool) *SessionCursor {
+	if !hasMore || len(sessions) == 0 {
+		return nil
+	}
+	last := sessions[len(sessions)-1]
+	if float64(last.UpdatedAt) == 0 {
+		return nil
+	}
+	return &SessionCursor{Pinned: last.Pinned, UpdatedAt: float64(last.UpdatedAt)}
+}
+
+func historyToChatMessages(history *ChatHistory) []chatMessage {
+	if history == nil {
+		return nil
+	}
+	messages := make([]chatMessage, 0, len(history.Messages))
+	for _, message := range history.Messages {
+		switch strings.ToUpper(strings.TrimSpace(message.Role)) {
+		case "USER":
+			text := message.UserText()
+			if text == "" {
+				continue
+			}
+			messages = append(messages, chatMessage{kind: msgUser, text: text})
+		case "ASSISTANT":
+			text := message.AssistantText()
+			thinking := message.AssistantThinking()
+			if text == "" && thinking == "" {
+				continue
+			}
+			messages = append(messages, chatMessage{
+				kind:     msgAssistant,
+				text:     text,
+				thinking: thinking,
+			})
+		}
+	}
+	return messages
+}
+
+func historyParentID(history *ChatHistory) *int64 {
+	if history == nil {
+		return nil
+	}
+	if history.CurrentMessageID != 0 {
+		for _, message := range history.Messages {
+			if int64(message.MessageID) == history.CurrentMessageID {
+				id := history.CurrentMessageID
+				return &id
+			}
+		}
+	}
+	for i := len(history.Messages) - 1; i >= 0; i-- {
+		if history.Messages[i].MessageID != 0 {
+			id := int64(history.Messages[i].MessageID)
+			return &id
+		}
+	}
+	return nil
 }
 
 // beginAuth switches the TUI into token entry, used on first run and ctrl+t.
@@ -387,6 +1076,10 @@ func (m *model) submitAuth() (tea.Model, tea.Cmd) {
 	m.authInput.Blur()
 	_ = m.input.Focus()
 	m.newChat()
+	m.sessions = nil
+	m.sessionIndex = 0
+	m.sessionsCursor = nil
+	m.sessionsHasMore = false
 
 	if saveErr != nil {
 		m.messages = append(m.messages, chatMessage{
