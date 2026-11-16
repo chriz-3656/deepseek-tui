@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -27,7 +29,7 @@ func TestWrapText(t *testing.T) {
 }
 
 func TestModelResizeAndView(t *testing.T) {
-	m := newModel(&APIClient{})
+	m := newModel("test-token")
 	if !strings.Contains(m.View(), "starting") {
 		t.Fatalf("unexpected pre-resize view: %q", m.View())
 	}
@@ -56,5 +58,53 @@ func TestModelResizeAndView(t *testing.T) {
 	m = updated.(*model)
 	if len(m.messages) != 0 || m.sessionID != "" || m.streaming {
 		t.Fatalf("new chat did not reset state")
+	}
+}
+
+func TestAuthAcceptsTypedAndPastedToken(t *testing.T) {
+	m := newModel("")
+	m.configPath = filepath.Join(t.TempDir(), "deepseek.token")
+
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(*model)
+	if !m.authMode {
+		t.Fatal("expected auth mode without a token")
+	}
+	if view := m.View(); !strings.Contains(view, "Connect to DeepSeek") {
+		t.Fatalf("auth view missing: %q", view)
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{
+		Type:  tea.KeyRunes,
+		Runes: []rune("pasted-token"),
+		Paste: true,
+	})
+	m = updated.(*model)
+	if got := m.authInput.Value(); got != "pasted-token" {
+		t.Fatalf("pasted value = %q", got)
+	}
+
+	m.authInput.SetValue("")
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("typed-token")})
+	m = updated.(*model)
+	if got := m.authInput.Value(); got != "typed-token" {
+		t.Fatalf("typed value = %q", got)
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(*model)
+	if m.authMode {
+		t.Fatal("auth mode did not exit after enter")
+	}
+	if m.token != "typed-token" || m.client == nil {
+		t.Fatalf("token/client not set")
+	}
+
+	data, err := os.ReadFile(m.configPath)
+	if err != nil {
+		t.Fatalf("token file: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != "typed-token" {
+		t.Fatalf("saved token = %q", data)
 	}
 }

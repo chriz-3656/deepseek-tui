@@ -1,12 +1,10 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -90,12 +88,18 @@ type streamEvent struct {
 }
 
 type model struct {
-	client *APIClient
-	events chan streamEvent
+	token      string
+	client     *APIClient
+	configPath string
+	events     chan streamEvent
 
-	viewport viewport.Model
-	input    textinput.Model
-	spinner  spinner.Model
+	viewport  viewport.Model
+	input     textinput.Model
+	authInput textinput.Model
+	spinner   spinner.Model
+
+	authMode  bool
+	authError string
 
 	messages  []chatMessage
 	sessionID string
@@ -110,26 +114,46 @@ type model struct {
 	ready         bool
 }
 
-func newModel(client *APIClient) *model {
+func newModel(token string) *model {
 	input := textinput.New()
 	input.Prompt = ""
 	input.Placeholder = "message DeepSeek…"
 	input.CharLimit = 8192
-	_ = input.Focus()
+
+	authInput := textinput.New()
+	authInput.Prompt = ""
+	authInput.Placeholder = "paste your userToken…"
+	authInput.CharLimit = 4096
+	authInput.Width = 60
 
 	spin := spinner.New()
 	spin.Spinner = spinner.Dot
 	spin.Style = lipgloss.NewStyle().Foreground(accentColor)
 
-	return &model{
-		client:      client,
-		events:      make(chan streamEvent, 1024),
-		viewport:    viewport.New(0, 0),
-		input:       input,
-		spinner:     spin,
-		status:      "ready",
+	m := &model{
+		token:      token,
+		configPath: tokenPath(),
+		events:     make(chan streamEvent, 1024),
+		viewport:   viewport.New(0, 0),
+		input:      input,
+		authInput:  authInput,
+		spinner:    spin,
+		status:     "ready",
 		statusLevel: statusIdle,
+		authMode:   token == "",
 	}
+	if token != "" {
+		m.client = NewAPIClient(token)
+	} else {
+		m.status = "token required"
+		m.statusLevel = statusWorking
+	}
+	if m.authMode {
+		_ = m.authInput.Focus()
+	} else {
+		_ = m.input.Focus()
+	}
+	return m
 }
 
 func (m *model) Init() tea.Cmd {
@@ -145,13 +169,26 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.Width = max(10, msg.Width-2)
 		m.viewport.Height = max(3, msg.Height-4)
 		m.input.Width = max(10, msg.Width-4)
+		m.authInput.Width = max(20, min(64, msg.Width-16))
+		if m.authMode {
+			return m, nil
+		}
 		m.renderChat(false)
 		return m, nil
 
 	case tea.KeyMsg:
+		if m.authMode {
+			return m.updateAuth(msg)
+		}
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
+		case "ctrl+t":
+			if !m.streaming {
+				m.beginAuth()
+				return m, textinput.Blink
+			}
+			return m, nil
 		case "ctrl+n":
 			if !m.streaming {
 				m.newChat()
@@ -209,6 +246,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	var cmd tea.Cmd
+	if m.authMode {
+		m.authInput, cmd = m.authInput.Update(msg)
+		return m, cmd
+	}
 	m.input, cmd = m.input.Update(msg)
 	return m, cmd
 }
@@ -217,24 +258,58 @@ func (m *model) View() string {
 	if !m.ready {
 		return "deepseek-tui\nstarting…"
 	}
+	if m.authMode {
+		return m.authView()
+	}
 
+	header := m.headerView(m.status, m.streaming)
+	inputLine := lipgloss.NewStyle().Foreground(accentColor).Render("› ") + m.input.View()
+	help := helpStyle.Render("enter send · ctrl+n new chat · ctrl+t token · pgup/pgdown scroll · ctrl+c quit")
+
+	return lipgloss.JoinVertical(lipgloss.Left, header, m.viewport.View(), inputLine, help)
+}
+
+func (m *model) headerView(status string, showSpinner bool) string {
 	left := titleStyle.Render("◆ deepseek-tui")
-	status := m.status
-	if m.streaming {
+	if showSpinner {
 		status = m.spinner.View() + " " + status
 	}
 	right := m.statusStyle().Render(status)
-
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 2
 	if gap < 1 {
 		gap = 1
 	}
-	header := " " + left + strings.Repeat(" ", gap) + right + " "
+	return " " + left + strings.Repeat(" ", gap) + right + " "
+}
 
-	inputLine := lipgloss.NewStyle().Foreground(accentColor).Render("› ") + m.input.View()
-	help := helpStyle.Render("enter send · ctrl+n new chat · pgup/pgdown scroll · ctrl+c quit")
+func (m *model) authView() string {
+	panelWidth := max(16, min(66, m.width-8))
+	m.authInput.Width = max(10, panelWidth-8)
 
-	return lipgloss.JoinVertical(lipgloss.Left, header, m.viewport.View(), inputLine, help)
+	lines := []string{
+		titleStyle.Render("Connect to DeepSeek"),
+		"",
+		helpStyle.Render("Paste your web client token below."),
+		helpStyle.Render("DevTools → Application → Local Storage → userToken."),
+		"",
+		lipgloss.NewStyle().Foreground(accentColor).Render("› ") + m.authInput.View(),
+	}
+	if m.authError != "" {
+		lines = append(lines, "", errorStyle.Render(m.authError))
+	}
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(accentColor).
+		Padding(1, 2).
+		Width(panelWidth).
+		Render(strings.Join(lines, "\n"))
+
+	bodyHeight := max(5, m.height-4)
+	body := lipgloss.Place(m.width, bodyHeight, lipgloss.Center, lipgloss.Center, box)
+	help := helpStyle.Render("enter save & start · paste with ctrl+v / right-click · ctrl+c quit")
+
+	return lipgloss.JoinVertical(lipgloss.Left, m.headerView(m.status, false), body, help)
 }
 
 func (m *model) statusStyle() lipgloss.Style {
@@ -258,6 +333,69 @@ func (m *model) newChat() {
 	m.statusLevel = statusIdle
 	m.viewport.SetContent("")
 	m.renderChat(false)
+}
+
+// beginAuth switches the TUI into token entry, used on first run and ctrl+t.
+func (m *model) beginAuth() {
+	m.authMode = true
+	m.authError = ""
+	m.authInput.SetValue("")
+	_ = m.authInput.Focus()
+	m.input.Blur()
+	m.status = "token required"
+	m.statusLevel = statusWorking
+}
+
+func (m *model) updateAuth(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		if m.token != "" {
+			m.authMode = false
+			m.authError = ""
+			m.authInput.Blur()
+			_ = m.input.Focus()
+			m.status = "ready"
+			m.statusLevel = statusIdle
+			return m, textinput.Blink
+		}
+		return m, tea.Quit
+	case "enter":
+		return m.submitAuth()
+	}
+
+	var cmd tea.Cmd
+	m.authInput, cmd = m.authInput.Update(msg)
+	return m, cmd
+}
+
+func (m *model) submitAuth() (tea.Model, tea.Cmd) {
+	token := normalizeToken(m.authInput.Value())
+	if token == "" {
+		m.authError = "token is empty"
+		return m, nil
+	}
+
+	m.authError = ""
+	m.token = token
+	m.client = NewAPIClient(token)
+	saveErr := saveToken(m.configPath, token)
+
+	m.authMode = false
+	m.authInput.SetValue("")
+	m.authInput.Blur()
+	_ = m.input.Focus()
+	m.newChat()
+
+	if saveErr != nil {
+		m.messages = append(m.messages, chatMessage{
+			kind: msgSystem,
+			text: "token is active, but saving " + m.configPath + " failed: " + saveErr.Error(),
+		})
+		m.renderChat(true)
+	}
+	return m, textinput.Blink
 }
 
 func (m *model) handleStreamEvent(event streamEvent) {
@@ -394,6 +532,11 @@ func (m *model) renderChat(scrollToBottom bool) {
 func (m *model) runCompletion(req CompletionRequest) tea.Cmd {
 	client := m.client
 	events := m.events
+	if client == nil {
+		return func() tea.Msg {
+			return streamEvent{kind: evError, text: "no DeepSeek token configured"}
+		}
+	}
 	return func() tea.Msg {
 		go func() {
 			ctx := context.Background()
@@ -534,46 +677,15 @@ func normalizeToken(s string) string {
 	return s
 }
 
-func resolveToken() (string, error) {
+func storedToken() string {
 	if token := normalizeToken(os.Getenv("DEEPSEEK_TOKEN")); token != "" {
-		return token, nil
+		return token
 	}
-
-	path := tokenPath()
-	if data, err := os.ReadFile(path); err == nil {
-		if token := normalizeToken(string(data)); token != "" {
-			return token, nil
-		}
+	data, err := os.ReadFile(tokenPath())
+	if err != nil {
+		return ""
 	}
-
-	fmt.Fprintln(os.Stderr, "No DeepSeek token found.")
-	fmt.Fprintln(os.Stderr, "Open https://chat.deepseek.com → DevTools → Application → Local Storage → userToken.")
-	fmt.Fprint(os.Stderr, "Token: ")
-
-	var raw string
-	if term.IsTerminal(int(os.Stdin.Fd())) {
-		data, err := term.ReadPassword(int(os.Stdin.Fd()))
-		fmt.Fprintln(os.Stderr)
-		if err != nil {
-			return "", fmt.Errorf("read token: %w", err)
-		}
-		raw = string(data)
-	} else {
-		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
-		if err != nil && !errors.Is(err, io.EOF) {
-			return "", fmt.Errorf("read token: %w", err)
-		}
-		raw = line
-	}
-
-	token := normalizeToken(raw)
-	if token == "" {
-		return "", errors.New("no token provided")
-	}
-	if err := saveToken(path, token); err != nil {
-		fmt.Fprintln(os.Stderr, "warning: could not save token:", err)
-	}
-	return token, nil
+	return normalizeToken(string(data))
 }
 
 func saveToken(path, token string) error {
@@ -589,6 +701,7 @@ func saveToken(path, token string) error {
 
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
+	tokenFlag := flag.String("token", "", "DeepSeek web userToken (overrides env and config file)")
 	flag.Parse()
 
 	if *showVersion {
@@ -596,13 +709,17 @@ func main() {
 		return
 	}
 
-	token, err := resolveToken()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "deepseek-tui:", err)
+	token := normalizeToken(*tokenFlag)
+	if token == "" {
+		token = storedToken()
+	}
+	if token == "" && !term.IsTerminal(int(os.Stdin.Fd())) {
+		fmt.Fprintln(os.Stderr, "deepseek-tui: no DeepSeek token found.")
+		fmt.Fprintln(os.Stderr, "Set DEEPSEEK_TOKEN, write ~/.config/deepseek.token, pass --token, or run from a terminal.")
 		os.Exit(1)
 	}
 
-	program := tea.NewProgram(newModel(NewAPIClient(token)), tea.WithAltScreen())
+	program := tea.NewProgram(newModel(token), tea.WithAltScreen())
 	if _, err := program.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "deepseek-tui:", err)
 		os.Exit(1)

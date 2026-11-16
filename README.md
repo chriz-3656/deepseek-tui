@@ -31,7 +31,8 @@ enter send · ctrl+n new chat · pgup/pgdown scroll · ctrl+c quit
 - Multi-turn sessions with `parent_message_id` tracking and `model_type`
   handling for the first turn.
 - Token discovery from `DEEPSEEK_TOKEN`, then `~/.config/deepseek.token`, with
-  an interactive prompt and secure save on first run.
+  a `--token` bypass and an in-TUI token screen that supports typing and
+  bracketed paste.
 - Tolerant response decoding: flat `{"id": ...}` and the production
   `data.biz_data...` envelope both work.
 
@@ -53,10 +54,12 @@ for Linux, macOS, and Windows.
 
 The app reads the token in this order:
 
-1. `DEEPSEEK_TOKEN` environment variable.
-2. `~/.config/deepseek.token`.
-3. Interactive prompt (input hidden, saved to `~/.config/deepseek.token` with
-   mode `0600`).
+1. `--token` flag.
+2. `DEEPSEEK_TOKEN` environment variable.
+3. `~/.config/deepseek.token`.
+4. The token screen inside the TUI. Input is visible, supports normal typing
+   and bracketed paste (`ctrl+v` or right-click), and saves to
+   `~/.config/deepseek.token` with mode `0600` on enter.
 
 Grab the value from the web client: open `https://chat.deepseek.com`, open
 DevTools → Application → Local Storage → `userToken`, and copy the value.
@@ -67,12 +70,21 @@ export DEEPSEEK_TOKEN="..."
 ./deepseek-tui
 ```
 
+Or skip the token screen entirely:
+
+```bash
+./deepseek-tui --token "..."
+```
+
+`ctrl+t` reopens the token screen inside a running session.
+
 ## Keys
 
 | Key | Action |
 | --- | --- |
-| `enter` | send the current message |
+| `enter` | send the current message / save the token |
 | `ctrl+n` | start a new chat session |
+| `ctrl+t` | change the DeepSeek token |
 | `pgup` / `pgdown` | scroll history |
 | `up` / `down` | scroll history |
 | `home` / `end` | jump to top / bottom |
