@@ -1,0 +1,6 @@
+/bin/
+/dist/
+deepseek-tui
+deepseek-tui.exe
+.env
+.DS_Store
