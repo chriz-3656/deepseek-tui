@@ -64,6 +64,16 @@ type chatMessage struct {
 	kind     messageKind
 	text     string
 	thinking string
+
+	renderedReplyText string
+	renderedWidth     int
+	renderedLen       int
+	replyCached       bool
+
+	renderedThinkingText string
+	thinkingWidth        int
+	thinkingLen          int
+	thinkingCached       bool
 }
 
 type streamEventKind int
@@ -541,6 +551,7 @@ func relativeTime(epoch float64) string {
 }
 
 func truncateText(text string, width int) string {
+	text = sanitizeText(text)
 	text = strings.ReplaceAll(text, "\n", " ")
 	text = strings.ReplaceAll(text, "\r", " ")
 	if width <= 0 {
@@ -1197,7 +1208,8 @@ func (m *model) renderChat(scrollToBottom bool) {
 		b.WriteString(helpStyle.Render("Type a message and press enter."))
 	}
 
-	for i, message := range m.messages {
+	for i := range m.messages {
+		message := &m.messages[i]
 		if i > 0 {
 			b.WriteString("\n\n")
 		}
@@ -1211,11 +1223,11 @@ func (m *model) renderChat(scrollToBottom bool) {
 			b.WriteString(aiLabelStyle.Render("deepseek"))
 			if message.thinking != "" {
 				b.WriteString("\n")
-				b.WriteString(thinkStyle.Render(wrapText(message.thinking, width)))
+				b.WriteString(thinkStyle.Render(message.renderedThinking(width)))
 			}
 			if message.text != "" {
 				b.WriteString("\n")
-				b.WriteString(wrapText(message.text, width))
+				b.WriteString(message.renderedReply(width))
 			}
 			if m.streaming && i == len(m.messages)-1 {
 				if message.text == "" && message.thinking == "" {
@@ -1314,6 +1326,7 @@ func friendlyError(err error) string {
 // -----------------------------------------------------------------------------
 
 func wrapText(text string, width int) string {
+	text = sanitizeText(text)
 	if width <= 0 {
 		return text
 	}
