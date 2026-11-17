@@ -23,6 +23,9 @@ enter send · ctrl+n new chat · pgup/pgdown scroll · ctrl+c quit
 
 - Bubble Tea TUI: header status, scrollable chat history, streaming output,
   spinner while connecting, inline proof-of-work progress.
+- Dual-mode binary: no arguments opens the TUI; prompt arguments run a
+  non-interactive one-shot query, with `-c`/`--code` printing only fenced code
+  blocks.
 - Pure Go `DeepSeekHashV1` solver: Keccak-f[1600] restricted to rounds 1–23,
   SHA3-style `0x06` padding, 136-byte rate, 32-byte digest, parallel nonce
   search across up to 8 workers.
@@ -57,6 +60,27 @@ go build -trimpath -buildvcs=false -ldflags "-s -w" -o deepseek-tui .
 `-buildvcs=false` keeps VCS metadata (remote path, commit, build time) out of
 the binary. Cross-compile with `make cross`; the app is pure Go and
 `CGO_ENABLED=0` works for Linux, macOS, and Windows.
+
+## CLI mode
+
+Run with a prompt to use the non-interactive CLI. The answer is streamed to
+stdout, thinking is disabled, and errors go to stderr:
+
+```bash
+./deepseek-tui "explain the keccak round constants"
+```
+
+Pass `-c` (or `--code`) to print only fenced Markdown code blocks:
+
+```bash
+./deepseek-tui -c "write a small Go HTTP server"
+```
+
+Flags may appear before or after the prompt. Use `--` for prompts that start
+with a dash. An empty prompt exits with status 0; invalid flags exit with 2.
+The token is resolved the same way as in the TUI (`--token`, `DEEPSEEK_TOKEN`,
+then the saved token file). A `--token` invocation with no prompt opens the
+TUI with that token.
 
 ## Token
 
