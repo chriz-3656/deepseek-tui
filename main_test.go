@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -192,6 +193,70 @@ func TestRecentChatsSwitch(t *testing.T) {
 		if !strings.Contains(view, want) {
 			t.Fatalf("view missing %q: %q", want, view)
 		}
+	}
+}
+
+func TestAuthTokenMaskedByDefaultAndTogglable(t *testing.T) {
+	m := newModel("")
+	m.configPath = filepath.Join(t.TempDir(), "deepseek.token")
+
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 90, Height: 30})
+	m = updated.(*model)
+
+	if m.authInput.EchoMode != textinput.EchoPassword {
+		t.Fatal("token input should start masked")
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("secret-token")})
+	m = updated.(*model)
+	if got := m.authInput.Value(); got != "secret-token" {
+		t.Fatalf("input value = %q", got)
+	}
+
+	masked := m.View()
+	if strings.Contains(masked, "secret-token") {
+		t.Fatal("masked view leaked the raw token")
+	}
+	if !strings.Contains(masked, strings.Repeat("•", 3)) {
+		t.Fatal("masked view is missing the mask characters")
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	m = updated.(*model)
+	if m.authInput.EchoMode != textinput.EchoNormal {
+		t.Fatal("ctrl+r did not reveal the token")
+	}
+	if view := m.View(); !strings.Contains(view, "secret-token") {
+		t.Fatal("revealed view is missing the raw token")
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	m = updated.(*model)
+	if m.authInput.EchoMode != textinput.EchoPassword {
+		t.Fatal("ctrl+r did not hide the token again")
+	}
+	if view := m.View(); strings.Contains(view, "secret-token") {
+		t.Fatal("re-masked view leaked the raw token")
+	}
+
+	m.authInput.SetValue("")
+	updated, _ = m.Update(tea.KeyMsg{
+		Type:  tea.KeyRunes,
+		Runes: []rune("pasted-secret"),
+		Paste: true,
+	})
+	m = updated.(*model)
+	if got := m.authInput.Value(); got != "pasted-secret" {
+		t.Fatalf("pasted value = %q", got)
+	}
+	if view := m.View(); strings.Contains(view, "pasted-secret") {
+		t.Fatal("masked view leaked a pasted token")
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(*model)
+	if m.authInput.EchoMode != textinput.EchoPassword {
+		t.Fatal("echo mode was not reset after submit")
 	}
 }
 

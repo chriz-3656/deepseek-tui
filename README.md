@@ -61,9 +61,11 @@ The app reads the token in this order:
 1. `--token` flag.
 2. `DEEPSEEK_TOKEN` environment variable.
 3. `~/.config/deepseek.token`.
-4. The token screen inside the TUI. Input is visible, supports normal typing
-   and bracketed paste (`ctrl+v` or right-click), and saves to
-   `~/.config/deepseek.token` with mode `0600` on enter.
+4. The token screen inside the TUI. Input is masked with dots by default,
+   supports normal typing and bracketed paste (`ctrl+v` or right-click),
+   and saves to `~/.config/deepseek.token` with mode `0600` on enter.
+   Press `ctrl+r` on that screen to reveal the token; press it again to
+   hide it.
 
 Grab the value from the web client: open `https://chat.deepseek.com`, open
 DevTools → Application → Local Storage → `userToken`, and copy the value.
@@ -80,7 +82,8 @@ Or skip the token screen entirely:
 ./deepseek-tui --token "..."
 ```
 
-`ctrl+t` reopens the token screen inside a running session.
+`ctrl+t` reopens the token screen inside a running session. Input is masked
+by default; `ctrl+r` on the token screen shows or hides it.
 
 ## Keys
 
@@ -98,6 +101,8 @@ Or skip the token screen entirely:
 
 Inside recent chats: `r` refreshes the list, `l` loads the next page, `n`
 starts a new chat, and `d` deletes the selected chat after `y` confirmation.
+
+On the token screen, `ctrl+r` toggles between masked and visible input.
 
 ## API flow
 

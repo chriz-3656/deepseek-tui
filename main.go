@@ -165,6 +165,8 @@ func newModel(token string) *model {
 	authInput.Placeholder = "paste your userToken…"
 	authInput.CharLimit = 4096
 	authInput.Width = 60
+	authInput.EchoMode = textinput.EchoPassword
+	authInput.EchoCharacter = '•'
 
 	spin := spinner.New()
 	spin.Spinner = spinner.Dot
@@ -353,6 +355,11 @@ func (m *model) authView() string {
 	panelWidth := max(16, min(66, m.width-8))
 	m.authInput.Width = max(10, panelWidth-8)
 
+	echoHint := "ctrl+r reveal token"
+	if m.authInput.EchoMode == textinput.EchoNormal {
+		echoHint = "ctrl+r hide token"
+	}
+
 	lines := []string{
 		titleStyle.Render("Connect to DeepSeek"),
 		"",
@@ -360,6 +367,7 @@ func (m *model) authView() string {
 		helpStyle.Render("DevTools → Application → Local Storage → userToken."),
 		"",
 		lipgloss.NewStyle().Foreground(accentColor).Render("› ") + m.authInput.View(),
+		helpStyle.Render(echoHint),
 	}
 	if m.authError != "" {
 		lines = append(lines, "", errorStyle.Render(m.authError))
@@ -374,7 +382,7 @@ func (m *model) authView() string {
 
 	bodyHeight := max(5, m.height-4)
 	body := lipgloss.Place(m.width, bodyHeight, lipgloss.Center, lipgloss.Center, box)
-	help := helpStyle.Render("enter save & start · paste with ctrl+v / right-click · ctrl+c quit")
+	help := helpStyle.Render("enter save & start · ctrl+r show/hide · paste ctrl+v · ctrl+c quit")
 
 	return lipgloss.JoinVertical(lipgloss.Left, m.headerView(m.status, false), body, help)
 }
@@ -1029,6 +1037,7 @@ func (m *model) beginAuth() {
 	m.authMode = true
 	m.authError = ""
 	m.authInput.SetValue("")
+	m.authInput.EchoMode = textinput.EchoPassword
 	_ = m.authInput.Focus()
 	m.input.Blur()
 	m.status = "token required"
@@ -1052,6 +1061,13 @@ func (m *model) updateAuth(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "enter":
 		return m.submitAuth()
+	case "ctrl+r":
+		if m.authInput.EchoMode == textinput.EchoPassword {
+			m.authInput.EchoMode = textinput.EchoNormal
+		} else {
+			m.authInput.EchoMode = textinput.EchoPassword
+		}
+		return m, nil
 	}
 
 	var cmd tea.Cmd
@@ -1073,6 +1089,7 @@ func (m *model) submitAuth() (tea.Model, tea.Cmd) {
 
 	m.authMode = false
 	m.authInput.SetValue("")
+	m.authInput.EchoMode = textinput.EchoPassword
 	m.authInput.Blur()
 	_ = m.input.Focus()
 	m.newChat()
