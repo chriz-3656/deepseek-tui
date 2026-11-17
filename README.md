@@ -190,6 +190,17 @@ pow.go       Keccak-f[1600] 23-round permutation, DeepSeekHashV1, solver
 request. Pushing a `v*` tag publishes Linux (amd64/arm64), macOS (amd64/arm64),
 and Windows (amd64) binaries plus `checksums.txt` to a GitHub release.
 
+## Withdrawn releases
+
+The `v0.1.0` through `v0.3.0` releases were withdrawn and their GitHub
+releases and tags deleted on 2026-11-17. Those binaries embedded a shared
+device id and fixed locale, timezone, and user-agent values, so every
+installation presented the same client identity.
+
+`v0.3.1` is the first build with per-install identity and is the only
+supported release. The old commits remain in git history for reference; do
+not distribute binaries built from them.
+
 ## License
 
 MIT

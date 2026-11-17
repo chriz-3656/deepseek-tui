@@ -177,6 +177,13 @@ base URL, and the completion target path.
 | `v0.3.0` | `b8ee9e8` | 2026-11-17 | Masked token input with `ctrl+r` reveal/hide |
 | `v0.3.1` | `f0a99bf` | 2026-11-17 | Per-install device id, derived locale/timezone/user agent, neutral build metadata |
 
+> **Withdrawn builds:** the `v0.1.0`–`v0.3.0` GitHub releases and tags were
+> deleted on 2026-11-17. Those binaries embedded a shared device id and fixed
+> locale, timezone, and user-agent values, giving every installation the same
+> client identity. `v0.3.1` is the only supported release. The old identifier
+> remains in historical commits but not in the current source or v0.3.1
+> binaries; do not distribute builds made from older commits.
+
 Supporting commits:
 
 | Commit | Purpose |
@@ -594,6 +601,9 @@ On a `v*` tag, the release job also:
 - creates or updates the GitHub release.
 
 ### Released assets for v0.3.1
+
+Earlier releases and tags were deleted on 2026-11-17; v0.3.1 is the only
+published build.
 
 - `checksums.txt`
 - `deepseek-tui-linux-amd64` (~7.2 MB)
