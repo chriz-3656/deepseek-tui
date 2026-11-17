@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
+	"io"
 	"os"
+	"os/signal"
+	"regexp"
 	"strings"
 	"time"
 
@@ -277,6 +279,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				ParentMessageID: m.parentID,
 				Prompt:          prompt,
 				FirstTurn:       m.parentID == nil,
+				ThinkingEnabled: true,
 			}
 			return m, tea.Batch(m.runCompletion(req), m.spinner.Tick, waitForEvent(m.events))
 		case "pgup", "pgdown", "up", "down", "home", "end":
@@ -1405,26 +1408,223 @@ func saveToken(path, token string) error {
 }
 
 // -----------------------------------------------------------------------------
+// CLI mode
+// -----------------------------------------------------------------------------
+
+var codeBlockPattern = regexp.MustCompile("(?s)```[^\\n]*\\r?\\n(.*?)```")
+
+type stealthOptions struct {
+	prompt   string
+	token    string
+	codeOnly bool
+	help     bool
+}
+
+// parseStealthArgs accepts flags anywhere in the argument list and joins every
+// non-flag argument into one prompt. Use -- to pass a prompt that starts with
+// a dash.
+func parseStealthArgs(args []string) (stealthOptions, error) {
+	var opts stealthOptions
+	var parts []string
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			parts = append(parts, args[i+1:]...)
+			break
+		}
+
+		switch {
+		case arg == "-c", arg == "--code", arg == "-code":
+			opts.codeOnly = true
+		case arg == "-h", arg == "--help", arg == "-help":
+			opts.help = true
+		case arg == "--token", arg == "-token":
+			if i+1 >= len(args) {
+				return opts, errors.New("--token requires a value")
+			}
+			i++
+			opts.token = args[i]
+		case strings.HasPrefix(arg, "--token="):
+			opts.token = strings.TrimPrefix(arg, "--token=")
+		case strings.HasPrefix(arg, "-token="):
+			opts.token = strings.TrimPrefix(arg, "-token=")
+		case strings.HasPrefix(arg, "-"):
+			return opts, fmt.Errorf("unknown flag %q", arg)
+		default:
+			parts = append(parts, arg)
+		}
+	}
+
+	opts.prompt = strings.TrimSpace(strings.Join(parts, " "))
+	return opts, nil
+}
+
+// extractCodeBlocks returns the contents of fenced Markdown code blocks. The
+// language label and surrounding prose are discarded.
+func extractCodeBlocks(text string) []string {
+	matches := codeBlockPattern.FindAllStringSubmatch(text, -1)
+	blocks := make([]string, 0, len(matches))
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		if block := strings.TrimSpace(match[1]); block != "" {
+			blocks = append(blocks, block)
+		}
+	}
+	return blocks
+}
+
+func printOnlyCodeTo(w io.Writer, text string) {
+	for _, block := range extractCodeBlocks(text) {
+		fmt.Fprintln(w, block)
+	}
+}
+
+func printOnlyCode(text string) {
+	printOnlyCodeTo(os.Stdout, text)
+}
+
+// runStealthQuery executes one request in a fresh session. Thinking is disabled
+// so stdout contains only the assistant's visible answer.
+func runStealthQuery(ctx context.Context, client *APIClient, prompt string, codeOnly bool, out io.Writer) error {
+	sessionID, err := client.CreateSession(ctx)
+	if err != nil {
+		return fmt.Errorf("create session: %w", err)
+	}
+
+	var reply strings.Builder
+	var writeErr error
+	wrote := false
+	var lastByte byte
+
+	err = client.Complete(ctx, CompletionRequest{
+		SessionID:       sessionID,
+		Prompt:          prompt,
+		FirstTurn:       true,
+		ThinkingEnabled: false,
+	}, CompletionHooks{
+		OnEvent: func(event StreamEvent) {
+			if event.Kind != StreamReply || event.Text == "" || writeErr != nil {
+				return
+			}
+			wrote = true
+			lastByte = event.Text[len(event.Text)-1]
+			if codeOnly {
+				reply.WriteString(event.Text)
+				return
+			}
+			if _, err := fmt.Fprint(out, event.Text); err != nil {
+				writeErr = err
+			}
+		},
+	})
+	if err != nil {
+		return err
+	}
+	if writeErr != nil {
+		return writeErr
+	}
+
+	if codeOnly {
+		printOnlyCodeTo(out, reply.String())
+		return nil
+	}
+	if wrote && lastByte != '\n' {
+		fmt.Fprintln(out)
+	}
+	return nil
+}
+
+func runStealthMode(args []string) int {
+	opts, err := parseStealthArgs(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "deepseek-tui:", err)
+		stealthUsage(os.Stderr)
+		return 2
+	}
+	if opts.help {
+		stealthUsage(os.Stdout)
+		return 0
+	}
+	if opts.prompt == "" {
+		return 0
+	}
+
+	token := normalizeToken(opts.token)
+	if token == "" {
+		token = storedToken()
+	}
+	if token == "" {
+		fmt.Fprintln(os.Stderr, "deepseek-tui: no DeepSeek token found.")
+		fmt.Fprintln(os.Stderr, "Set DEEPSEEK_TOKEN, write "+tokenPath()+", or pass --token.")
+		return 1
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	client := NewAPIClient(token)
+	if err := runStealthQuery(ctx, client, opts.prompt, opts.codeOnly, os.Stdout); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return 130
+		}
+		fmt.Fprintln(os.Stderr, "deepseek-tui:", friendlyError(err))
+		return 1
+	}
+	return 0
+}
+
+func stealthUsage(w io.Writer) {
+	fmt.Fprintln(w, `usage: deepseek-tui [flags] <prompt>
+
+Run with no arguments to open the interactive TUI. With a prompt, run one
+non-interactive query and stream the answer to stdout.
+
+flags:
+  -c, --code         print only fenced Markdown code blocks
+      --token TOKEN  DeepSeek web userToken (overrides env and config file)
+  -h, --help         show this help
+      --version      print version and exit
+
+Token lookup: --token, DEEPSEEK_TOKEN, then the saved token file.
+Put -- before a prompt that starts with a dash. An empty prompt exits 0.`)
+}
+
+func isVersionOnly(args []string) bool {
+	return len(args) == 1 && (args[0] == "--version" || args[0] == "-version")
+}
+
+// tokenOnly preserves the old --token invocation as a way to open the TUI with
+// a token override. A token flag combined with a prompt enters CLI mode.
+func tokenOnly(args []string) (string, bool) {
+	if len(args) == 2 && (args[0] == "--token" || args[0] == "-token") {
+		return args[1], true
+	}
+	if len(args) == 1 {
+		switch {
+		case strings.HasPrefix(args[0], "--token="):
+			return strings.TrimPrefix(args[0], "--token="), true
+		case strings.HasPrefix(args[0], "-token="):
+			return strings.TrimPrefix(args[0], "-token="), true
+		}
+	}
+	return "", false
+}
+
+// -----------------------------------------------------------------------------
 // entry point
 // -----------------------------------------------------------------------------
 
-func main() {
-	showVersion := flag.Bool("version", false, "print version and exit")
-	tokenFlag := flag.String("token", "", "DeepSeek web userToken (overrides env and config file)")
-	flag.Parse()
-
-	if *showVersion {
-		fmt.Println("deepseek-tui " + version)
-		return
-	}
-
-	token := normalizeToken(*tokenFlag)
+func runTUI(tokenOverride string) {
+	token := normalizeToken(tokenOverride)
 	if token == "" {
 		token = storedToken()
 	}
 	if token == "" && !term.IsTerminal(int(os.Stdin.Fd())) {
 		fmt.Fprintln(os.Stderr, "deepseek-tui: no DeepSeek token found.")
-		fmt.Fprintln(os.Stderr, "Set DEEPSEEK_TOKEN, write ~/.config/deepseek.token, pass --token, or run from a terminal.")
+		fmt.Fprintln(os.Stderr, "Set DEEPSEEK_TOKEN, write "+tokenPath()+", pass --token, or run from a terminal.")
 		os.Exit(1)
 	}
 
@@ -1432,5 +1632,25 @@ func main() {
 	if _, err := program.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "deepseek-tui:", err)
 		os.Exit(1)
+	}
+}
+
+func main() {
+	args := os.Args[1:]
+
+	if len(args) == 0 {
+		runTUI("")
+		return
+	}
+	if isVersionOnly(args) {
+		fmt.Println("deepseek-tui " + version)
+		return
+	}
+	if token, ok := tokenOnly(args); ok {
+		runTUI(token)
+		return
+	}
+	if code := runStealthMode(args); code != 0 {
+		os.Exit(code)
 	}
 }

@@ -503,6 +503,7 @@ type CompletionRequest struct {
 	ParentMessageID *int64
 	Prompt          string
 	FirstTurn       bool
+	ThinkingEnabled bool
 }
 
 // StreamEventKind identifies what a streamed event carries.
@@ -575,7 +576,7 @@ func (c *APIClient) Complete(ctx context.Context, req CompletionRequest, hooks C
 		ModelType:       modelType,
 		Prompt:          req.Prompt,
 		RefFileIDs:      []string{},
-		ThinkingEnabled: true,
+		ThinkingEnabled: req.ThinkingEnabled,
 		SearchEnabled:   true,
 		Preempt:         false,
 	}
