@@ -25,7 +25,7 @@ enter send · ctrl+n new chat · pgup/pgdown scroll · ctrl+c quit
   spinner while connecting, inline proof-of-work progress.
 - Dual-mode binary: no arguments opens the TUI; prompt arguments run a
   non-interactive one-shot query, with `-c`/`--code` printing only fenced code
-  blocks.
+  blocks and `--first`/`--lang` selecting output.
 - Pure Go `DeepSeekHashV1` solver: Keccak-f[1600] restricted to rounds 1–23,
   SHA3-style `0x06` padding, 136-byte rate, 32-byte digest, parallel nonce
   search across up to 8 workers.
@@ -70,11 +70,25 @@ stdout, thinking is disabled, and errors go to stderr:
 ./deepseek-tui "explain the keccak round constants"
 ```
 
-Pass `-c` (or `--code`) to print only fenced Markdown code blocks:
+Pass `-c` (or `--code`) to print only fenced Markdown code blocks. In this
+mode the prompt is extended with a short instruction asking for a single
+fenced block; pass `--no-hint` to send the prompt unchanged:
 
 ```bash
 ./deepseek-tui -c "write a small Go HTTP server"
 ```
+
+Select only the first block, or filter by language:
+
+```bash
+./deepseek-tui --first "write a shell script" > script.sh
+./deepseek-tui --lang bash,sh "write a shell script"
+```
+
+`--first` and `--lang` imply `-c`. Language names are matched
+case-insensitively; common aliases such as `shell`, `sh`, `bash`, `js`,
+`python`, and `golang` are recognized. If no block is found, or none matches
+`--lang`, stdout stays empty and the process exits 3.
 
 Flags may appear before or after the prompt. Use `--` for prompts that start
 with a dash. An empty prompt exits with status 0; invalid flags exit with 2.
