@@ -198,8 +198,9 @@ device id and fixed locale, timezone, and user-agent values, so every
 installation presented the same client identity.
 
 `v0.3.1` is the first build with per-install identity and is the only
-supported release. The old commits remain in git history for reference; do
-not distribute binaries built from them.
+supported release. On 2026-11-17 the repository history was rewritten and
+force-pushed to purge the embedded identifier from every commit. Build only
+from `v0.3.1` or later; if you have an older clone, re-clone it.
 
 ## License
 

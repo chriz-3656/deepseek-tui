@@ -180,9 +180,9 @@ base URL, and the completion target path.
 > **Withdrawn builds:** the `v0.1.0`–`v0.3.0` GitHub releases and tags were
 > deleted on 2026-11-17. Those binaries embedded a shared device id and fixed
 > locale, timezone, and user-agent values, giving every installation the same
-> client identity. `v0.3.1` is the only supported release. The old identifier
-> remains in historical commits but not in the current source or v0.3.1
-> binaries; do not distribute builds made from older commits.
+> client identity. `v0.3.1` is the only supported release. The repository
+> history was rewritten and force-pushed on 2026-11-17 to purge the old
+> identifier from every commit. Build only from `v0.3.1` or later.
 
 Supporting commits:
 
