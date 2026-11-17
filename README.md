@@ -229,7 +229,9 @@ pow.go       Keccak-f[1600] 23-round permutation, DeepSeekHashV1, solver
 `.github/workflows/ci.yml` runs `go mod tidy`, `go vet`, `go test -race`, a
 `CGO_ENABLED=0` build, and a `--version` smoke test on every push and pull
 request. Pushing a `v*` tag publishes Linux (amd64/arm64), macOS (amd64/arm64),
-and Windows (amd64) binaries plus `checksums.txt` to a GitHub release.
+and Windows (amd64) binaries plus `checksums.txt` to a GitHub release. Release
+notes come from the matching section of `CHANGELOG.md`, falling back to
+GitHub's generated notes when no section exists.
 
 ## Withdrawn releases
 
@@ -239,10 +241,10 @@ device id and fixed locale, timezone, and user-agent values, so every
 installation presented the same client identity.
 
 `v0.3.1` introduced per-install identity and was removed when `v0.4.0`
-shipped, so only the latest release stays published. Its identity fixes are
-included in `v0.4.0`. On 2026-11-17 the repository history was rewritten and
-force-pushed to purge the embedded identifier from every commit. Build only
-from `v0.4.0`; if you have an older clone, re-clone it.
+shipped. Its identity fixes are included in `v0.4.0` and later. On 2026-11-17
+the repository history was rewritten and force-pushed to purge the embedded
+identifier from every commit. Build only from `v0.4.0` or newer; if you have an
+older clone, re-clone it.
 
 ## License
 
