@@ -1543,9 +1543,7 @@ func normalizeLanguage(label string) string {
 }
 
 var languageAliases = map[string][]string{
-	"shell":      {"sh", "bash", "zsh", "fish", "shell"},
-	"sh":         {"bash", "zsh", "fish", "shell"},
-	"bash":       {"sh", "zsh", "shell"},
+	"shell":      {"sh", "bash", "zsh", "fish"},
 	"js":         {"javascript"},
 	"javascript": {"js"},
 	"ts":         {"typescript"},

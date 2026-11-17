@@ -86,9 +86,10 @@ Select only the first block, or filter by language:
 ```
 
 `--first` and `--lang` imply `-c`. Language names are matched
-case-insensitively; common aliases such as `shell`, `sh`, `bash`, `js`,
-`python`, and `golang` are recognized. If no block is found, or none matches
-`--lang`, stdout stays empty and the process exits 3.
+case-insensitively; `shell` matches `sh`, `bash`, `zsh`, and `fish`, and common
+pairs such as `js`/`javascript`, `py`/`python`, `ts`/`typescript`, and
+`golang`/`go` are recognized. If no block is found, or none matches `--lang`,
+stdout stays empty and the process exits 3.
 
 Flags may appear before or after the prompt. Use `--` for prompts that start
 with a dash. An empty prompt exits with status 0; invalid flags exit with 2.

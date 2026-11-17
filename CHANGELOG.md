@@ -11,8 +11,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `-1` / `--first` to print only the first selected code block, useful for
   redirecting one script to a file.
 - `-l` / `--lang` to filter blocks by language, including comma-separated
-  lists and aliases such as `shell`, `sh`, `bash`, `js`, `python`, and
-  `golang`.
+  lists. `shell` matches `sh`, `bash`, `zsh`, and `fish`; common pairs such as
+  `js`/`javascript`, `py`/`python`, `ts`/`typescript`, and `golang`/`go` are
+  recognized.
 - Automatic code-only instruction in `-c` mode asking for one fenced block
   with all commands inside it. `--no-hint` sends the prompt unchanged.
 - Tests for language labels, filtering, selection, and prompt construction.
