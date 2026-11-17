@@ -1411,12 +1411,29 @@ func saveToken(path, token string) error {
 // CLI mode
 // -----------------------------------------------------------------------------
 
-var codeBlockPattern = regexp.MustCompile("(?s)```[^\\n]*\\r?\\n(.*?)```")
+var codeBlockPattern = regexp.MustCompile("(?s)```([^\\n]*)\\r?\\n(.*?)```")
+
+var errNoCodeBlock = errors.New("no fenced code block found")
+
+const codeOnlyInstruction = "Return only the final code or commands in a single fenced Markdown code block with an appropriate language label. Put all necessary commands inside the block. Do not include explanations, alternatives, or text outside the block."
+
+type codeBlock struct {
+	language string
+	body     string
+}
+
+type codeFilter struct {
+	first bool
+	lang  string
+}
 
 type stealthOptions struct {
 	prompt   string
 	token    string
 	codeOnly bool
+	first    bool
+	lang     string
+	noHint   bool
 	help     bool
 }
 
@@ -1437,6 +1454,33 @@ func parseStealthArgs(args []string) (stealthOptions, error) {
 		switch {
 		case arg == "-c", arg == "--code", arg == "-code":
 			opts.codeOnly = true
+		case arg == "-1", arg == "--first":
+			opts.codeOnly = true
+			opts.first = true
+		case arg == "-l", arg == "--lang":
+			if i+1 >= len(args) {
+				return opts, errors.New("--lang requires a value")
+			}
+			i++
+			opts.lang = strings.TrimSpace(args[i])
+			if opts.lang == "" {
+				return opts, errors.New("--lang requires a value")
+			}
+			opts.codeOnly = true
+		case strings.HasPrefix(arg, "--lang="):
+			opts.lang = strings.TrimSpace(strings.TrimPrefix(arg, "--lang="))
+			if opts.lang == "" {
+				return opts, errors.New("--lang requires a value")
+			}
+			opts.codeOnly = true
+		case strings.HasPrefix(arg, "-lang="):
+			opts.lang = strings.TrimSpace(strings.TrimPrefix(arg, "-lang="))
+			if opts.lang == "" {
+				return opts, errors.New("--lang requires a value")
+			}
+			opts.codeOnly = true
+		case arg == "--no-hint", arg == "-no-hint":
+			opts.noHint = true
 		case arg == "-h", arg == "--help", arg == "-help":
 			opts.help = true
 		case arg == "--token", arg == "-token":
@@ -1460,35 +1504,116 @@ func parseStealthArgs(args []string) (stealthOptions, error) {
 	return opts, nil
 }
 
-// extractCodeBlocks returns the contents of fenced Markdown code blocks. The
-// language label and surrounding prose are discarded.
-func extractCodeBlocks(text string) []string {
+// buildRequestPrompt appends the code-only instruction used by -c. The hint is
+// part of the prompt because the API has no system role.
+func buildRequestPrompt(prompt string, opts stealthOptions) string {
+	if !opts.codeOnly || opts.noHint {
+		return prompt
+	}
+	return prompt + "\n\n" + codeOnlyInstruction
+}
+
+// extractCodeBlocks returns fenced Markdown code blocks and their language
+// labels. Surrounding prose is discarded.
+func extractCodeBlocks(text string) []codeBlock {
 	matches := codeBlockPattern.FindAllStringSubmatch(text, -1)
-	blocks := make([]string, 0, len(matches))
+	blocks := make([]codeBlock, 0, len(matches))
 	for _, match := range matches {
-		if len(match) < 2 {
+		if len(match) < 3 {
 			continue
 		}
-		if block := strings.TrimSpace(match[1]); block != "" {
-			blocks = append(blocks, block)
+		body := strings.TrimSpace(match[2])
+		if body == "" {
+			continue
 		}
+		blocks = append(blocks, codeBlock{
+			language: normalizeLanguage(match[1]),
+			body:     body,
+		})
 	}
 	return blocks
 }
 
-func printOnlyCodeTo(w io.Writer, text string) {
-	for _, block := range extractCodeBlocks(text) {
-		fmt.Fprintln(w, block)
+func normalizeLanguage(label string) string {
+	fields := strings.Fields(strings.TrimSpace(label))
+	if len(fields) == 0 {
+		return ""
 	}
+	return strings.ToLower(fields[0])
 }
 
-func printOnlyCode(text string) {
-	printOnlyCodeTo(os.Stdout, text)
+var languageAliases = map[string][]string{
+	"shell":      {"sh", "bash", "zsh", "fish"},
+	"js":         {"javascript"},
+	"javascript": {"js"},
+	"ts":         {"typescript"},
+	"typescript": {"ts"},
+	"py":         {"python"},
+	"python":     {"py"},
+	"golang":     {"go"},
+}
+
+func languageMatches(label, want string) bool {
+	if label == want {
+		return true
+	}
+	for _, alias := range languageAliases[want] {
+		if label == alias {
+			return true
+		}
+	}
+	return false
+}
+
+func matchesLanguageFilter(label, filter string) bool {
+	if strings.TrimSpace(filter) == "" {
+		return true
+	}
+	for _, want := range strings.Split(filter, ",") {
+		want = strings.ToLower(strings.TrimSpace(want))
+		if want == "" {
+			continue
+		}
+		if languageMatches(label, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func selectCodeBlocks(text string, filter codeFilter) []codeBlock {
+	blocks := extractCodeBlocks(text)
+	selected := make([]codeBlock, 0, len(blocks))
+	for _, block := range blocks {
+		if matchesLanguageFilter(block.language, filter.lang) {
+			selected = append(selected, block)
+		}
+	}
+	if filter.first && len(selected) > 1 {
+		selected = selected[:1]
+	}
+	return selected
+}
+
+func printOnlyCodeTo(w io.Writer, text string, filter codeFilter) error {
+	blocks := selectCodeBlocks(text, filter)
+	if len(blocks) == 0 {
+		if filter.lang != "" {
+			return fmt.Errorf("%w matching --lang=%s", errNoCodeBlock, filter.lang)
+		}
+		return errNoCodeBlock
+	}
+	for _, block := range blocks {
+		if _, err := fmt.Fprintln(w, block.body); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // runStealthQuery executes one request in a fresh session. Thinking is disabled
 // so stdout contains only the assistant's visible answer.
-func runStealthQuery(ctx context.Context, client *APIClient, prompt string, codeOnly bool, out io.Writer) error {
+func runStealthQuery(ctx context.Context, client *APIClient, prompt string, codeOnly bool, filter codeFilter, out io.Writer) error {
 	sessionID, err := client.CreateSession(ctx)
 	if err != nil {
 		return fmt.Errorf("create session: %w", err)
@@ -1528,8 +1653,7 @@ func runStealthQuery(ctx context.Context, client *APIClient, prompt string, code
 	}
 
 	if codeOnly {
-		printOnlyCodeTo(out, reply.String())
-		return nil
+		return printOnlyCodeTo(out, reply.String(), filter)
 	}
 	if wrote && lastByte != '\n' {
 		fmt.Fprintln(out)
@@ -1566,9 +1690,15 @@ func runStealthMode(args []string) int {
 	defer stop()
 
 	client := NewAPIClient(token)
-	if err := runStealthQuery(ctx, client, opts.prompt, opts.codeOnly, os.Stdout); err != nil {
+	filter := codeFilter{first: opts.first, lang: opts.lang}
+	prompt := buildRequestPrompt(opts.prompt, opts)
+	if err := runStealthQuery(ctx, client, prompt, opts.codeOnly, filter, os.Stdout); err != nil {
 		if errors.Is(err, context.Canceled) {
 			return 130
+		}
+		if errors.Is(err, errNoCodeBlock) {
+			fmt.Fprintln(os.Stderr, "deepseek-tui:", err)
+			return 3
 		}
 		fmt.Fprintln(os.Stderr, "deepseek-tui:", friendlyError(err))
 		return 1
@@ -1584,9 +1714,15 @@ non-interactive query and stream the answer to stdout.
 
 flags:
   -c, --code         print only fenced Markdown code blocks
+  -1, --first        print only the first selected block (implies --code)
+  -l, --lang LANG    only blocks in LANG, comma-separated (implies --code)
+      --no-hint      send the prompt without the automatic code-only instruction
       --token TOKEN  DeepSeek web userToken (overrides env and config file)
   -h, --help         show this help
       --version      print version and exit
+
+Code mode appends an instruction asking for one fenced code block. If no block
+is found, stdout stays empty and the exit code is 3.
 
 Token lookup: --token, DEEPSEEK_TOKEN, then the saved token file.
 Put -- before a prompt that starts with a dash. An empty prompt exits 0.`)

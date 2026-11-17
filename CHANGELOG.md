@@ -4,6 +4,27 @@ All notable changes to this project are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-11-17
+
+### Added
+
+- `-1` / `--first` to print only the first selected code block, useful for
+  redirecting one script to a file.
+- `-l` / `--lang` to filter blocks by language, including comma-separated
+  lists. `shell` matches `sh`, `bash`, `zsh`, and `fish`; common pairs such as
+  `js`/`javascript`, `py`/`python`, `ts`/`typescript`, and `golang`/`go` are
+  recognized.
+- Automatic code-only instruction in `-c` mode asking for one fenced block
+  with all commands inside it. `--no-hint` sends the prompt unchanged.
+- Tests for language labels, filtering, selection, and prompt construction.
+
+### Changed
+
+- `-c` now exits with status 3 when no fenced block is found or no block
+  matches `--lang`, instead of silently returning 0.
+- Code-mode answers are more likely to contain a single final script instead
+  of several alternatives.
+
 ## [0.5.0] - 2026-11-17
 
 ### Added
@@ -43,5 +64,6 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   history was rewritten to purge the embedded identifier; older clones must be
   re-cloned.
 
+[0.5.1]: https://github.com/chriz-3656/deepseek-tui/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/chriz-3656/deepseek-tui/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/chriz-3656/deepseek-tui/releases/tag/v0.4.0
