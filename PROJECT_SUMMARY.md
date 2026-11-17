@@ -593,7 +593,7 @@ On a `v*` tag, the release job also:
 - writes `checksums.txt` with SHA-256 sums;
 - creates or updates the GitHub release.
 
-### Released assets for v0.3.0
+### Released assets for v0.3.1
 
 - `checksums.txt`
 - `deepseek-tui-linux-amd64` (~7.2 MB)
@@ -604,6 +604,11 @@ On a `v*` tag, the release job also:
 
 ## 8. Verification performed
 
+- v0.3.1: push CI and tag release both passed; all six assets matched their
+  published SHA-256 digests; the Linux binary reported `deepseek-tui v0.3.1`.
+- A `strings` audit of the v0.3.1 Linux binary found no shared device UUID, no
+  repository handle, no `vcs.revision`/`vcs.time`, and no fixed timezone
+  offline. Build info reports `path deepseek-tui`.
 - CI passed on the recent-chats commit:
   - tidy check;
   - vet;
