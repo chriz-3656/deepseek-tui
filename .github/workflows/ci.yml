@@ -98,6 +98,19 @@ jobs:
           cd dist
           sha256sum * > checksums.txt
 
+      - name: prepare release notes
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          awk -v ver="$tag" '
+            index($0, "## [" ver "]") == 1 { found=1; next }
+            found && index($0, "## [") == 1 { exit }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            rm -f release-notes.md
+          fi
+
       - name: publish release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -105,6 +118,13 @@ jobs:
           set -euo pipefail
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
             gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+            if [ -f release-notes.md ]; then
+              gh release edit "${GITHUB_REF_NAME}" --notes-file release-notes.md
+            fi
+          elif [ -f release-notes.md ]; then
+            gh release create "${GITHUB_REF_NAME}" dist/* \
+              --title "deepseek-tui ${GITHUB_REF_NAME}" \
+              --notes-file release-notes.md
           else
             gh release create "${GITHUB_REF_NAME}" dist/* \
               --title "deepseek-tui ${GITHUB_REF_NAME}" \
