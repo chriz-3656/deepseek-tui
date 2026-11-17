@@ -48,11 +48,12 @@ enter send · ctrl+n new chat · pgup/pgdown scroll · ctrl+c quit
 ## Build
 
 ```bash
-go build -trimpath -ldflags "-s -w" -o deepseek-tui .
+go build -trimpath -buildvcs=false -ldflags "-s -w" -o deepseek-tui .
 ```
 
-Cross-compile with `make cross`; the app is pure Go and `CGO_ENABLED=0` works
-for Linux, macOS, and Windows.
+`-buildvcs=false` keeps VCS metadata (remote path, commit, build time) out of
+the binary. Cross-compile with `make cross`; the app is pure Go and
+`CGO_ENABLED=0` works for Linux, macOS, and Windows.
 
 ## Token
 
@@ -134,7 +135,19 @@ Recent chats use three additional web endpoints:
 
 The browser headers (`x-client-version`, `x-client-platform`, bundle id,
 locale, timezone offset, device id, Firefox user agent) are set on every
-request to match the web client.
+request to match the web client. Identity values are per install and derived
+at startup:
+
+- `x-device-id` is a UUIDv4 generated on first run and stored at
+  `~/.config/deepseek.device` with mode `0600`. Set `DEEPSEEK_DEVICE_ID` to
+  override it.
+- `x-client-locale` comes from `LC_ALL`, `LC_MESSAGES`, or `LANG`, normalized
+  to the `xx_YY` form; `en_US` is the fallback.
+- `x-client-timezone-offset` is the current OS UTC offset in seconds.
+- `User-Agent` matches the build platform. Set `DEEPSEEK_USER_AGENT` to
+  override it.
+
+No device id, locale, timezone, or user agent is baked into the executable.
 
 ## Proof-of-work details
 
@@ -164,6 +177,7 @@ a40318e6b7af56bf27cf_1790959021012_58595
 
 ```
 main.go      Bubble Tea model/update/view, auth, text wrapping, styles
+clientenv.go per-install device id, locale, timezone, user agent, private files
 api.go       HTTP client, envelopes, PoW response header, SSE parser
 pow.go       Keccak-f[1600] 23-round permutation, DeepSeekHashV1, solver
 *_test.go    captured hash vectors, solver, envelope shapes, SSE protocols

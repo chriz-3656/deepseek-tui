@@ -19,12 +19,8 @@ import (
 
 const (
 	apiBaseURL          = "https://chat.deepseek.com/api/v0"
-	defaultUserAgent    = "Mozilla/5.0 (X11; Linux x86_64; rv:151.0) Gecko/20100101 Firefox/151.0"
 	clientVersion       = "2.8.0"
 	clientBundleID      = "com.deepseek.chat"
-	clientLocale        = "en_US"
-	clientTimezone      = "-18000"
-	defaultDeviceID     = "00000000-0000-4000-8000-000000000000"
 	completionTargetURL = "/api/v0/chat/completion"
 )
 
@@ -47,10 +43,13 @@ func (e *APIError) Error() string {
 
 // APIClient talks to the DeepSeek web chat backend with a browser userToken.
 type APIClient struct {
-	baseURL  string
-	token    string
-	deviceID string
-	http     *http.Client
+	baseURL   string
+	token     string
+	deviceID  string
+	locale    string
+	timezone  string
+	userAgent string
+	http      *http.Client
 }
 
 func NewAPIClient(token string) *APIClient {
@@ -64,10 +63,13 @@ func NewAPIClient(token string) *APIClient {
 		ResponseHeaderTimeout: 60 * time.Second,
 	}
 	return &APIClient{
-		baseURL:  apiBaseURL,
-		token:    token,
-		deviceID: defaultDeviceID,
-		http:     &http.Client{Transport: transport},
+		baseURL:   apiBaseURL,
+		token:     token,
+		deviceID:  resolveDeviceID(),
+		locale:    systemLocale(),
+		timezone:  systemTimezoneOffset(),
+		userAgent: systemUserAgent(),
+		http:      &http.Client{Transport: transport},
 	}
 }
 
@@ -79,13 +81,15 @@ func (c *APIClient) newRequest(ctx context.Context, method, path string, body []
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "*/*")
-	req.Header.Set("User-Agent", defaultUserAgent)
+	req.Header.Set("User-Agent", c.userAgent)
 	req.Header.Set("x-client-version", clientVersion)
 	req.Header.Set("x-client-platform", "web")
 	req.Header.Set("x-client-bundle-id", clientBundleID)
-	req.Header.Set("x-client-locale", clientLocale)
-	req.Header.Set("x-client-timezone-offset", clientTimezone)
-	req.Header.Set("x-device-id", c.deviceID)
+	req.Header.Set("x-client-locale", c.locale)
+	req.Header.Set("x-client-timezone-offset", c.timezone)
+	if c.deviceID != "" {
+		req.Header.Set("x-device-id", c.deviceID)
+	}
 	req.Header.Set("Origin", "https://chat.deepseek.com")
 	req.Header.Set("Referer", "https://chat.deepseek.com/")
 	return req, nil

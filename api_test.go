@@ -7,9 +7,70 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 )
+
+func TestNewRequestUsesClientIdentity(t *testing.T) {
+	client := &APIClient{
+		baseURL:   "https://example.invalid",
+		token:     "tok",
+		deviceID:  "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+		locale:    "de_DE",
+		timezone:  "7200",
+		userAgent: "custom-agent/1.0",
+		http:      http.DefaultClient,
+	}
+
+	req, err := client.newRequest(context.Background(), http.MethodPost, "/x", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	want := map[string]string{
+		"Authorization":            "Bearer tok",
+		"User-Agent":               "custom-agent/1.0",
+		"x-client-version":         clientVersion,
+		"x-client-platform":        "web",
+		"x-client-bundle-id":       clientBundleID,
+		"x-client-locale":          "de_DE",
+		"x-client-timezone-offset": "7200",
+		"x-device-id":              "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+	}
+	for name, value := range want {
+		if got := req.Header.Get(name); got != value {
+			t.Errorf("%s = %q, want %q", name, got, value)
+		}
+	}
+
+	client.deviceID = ""
+	req, err = client.newRequest(context.Background(), http.MethodPost, "/x", nil)
+	if err != nil {
+		t.Fatalf("new request without device id: %v", err)
+	}
+	if _, ok := req.Header["X-Device-Id"]; ok {
+		t.Fatalf("empty device id should omit the header, got %q", req.Header.Get("x-device-id"))
+	}
+}
+
+func TestNewAPIClientDerivesIdentity(t *testing.T) {
+	t.Setenv("DEEPSEEK_DEVICE_ID", "env-device-id")
+	t.Setenv("DEEPSEEK_USER_AGENT", "env-agent/2.0")
+	client := NewAPIClient("tok")
+
+	if client.deviceID != "env-device-id" {
+		t.Fatalf("device id = %q", client.deviceID)
+	}
+	if client.userAgent != "env-agent/2.0" {
+		t.Fatalf("user agent = %q", client.userAgent)
+	}
+	if client.locale == "" || !validLocale(client.locale) {
+		t.Fatalf("locale = %q", client.locale)
+	}
+	if _, err := strconv.Atoi(client.timezone); err != nil {
+		t.Fatalf("timezone = %q: %v", client.timezone, err)
+	}
+}
 
 func TestCreateSessionResponseShapes(t *testing.T) {
 	cases := []struct {

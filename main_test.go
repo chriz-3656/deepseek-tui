@@ -11,6 +11,12 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+func TestMain(m *testing.M) {
+	// Tests must never read or write the real per-user device id file.
+	os.Setenv("DEEPSEEK_DEVICE_ID", "11111111-1111-4111-8111-111111111111")
+	os.Exit(m.Run())
+}
+
 func TestWrapText(t *testing.T) {
 	got := wrapText("alpha beta gamma delta", 11)
 	want := "alpha beta\ngamma delta"

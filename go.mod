@@ -1,4 +1,4 @@
-module github.com/chriz-3656/deepseek-tui
+module deepseek-tui
 
 go 1.24.2
 

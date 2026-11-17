@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -1368,16 +1367,6 @@ func wrapText(text string, width int) string {
 // auth
 // -----------------------------------------------------------------------------
 
-func tokenPath() string {
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		return filepath.Join(home, ".config", "deepseek.token")
-	}
-	if dir, err := os.UserConfigDir(); err == nil && dir != "" {
-		return filepath.Join(dir, "deepseek.token")
-	}
-	return "deepseek.token"
-}
-
 func normalizeToken(s string) string {
 	s = strings.TrimSpace(s)
 	s = strings.Trim(s, `"'`)
@@ -1399,10 +1388,7 @@ func storedToken() string {
 }
 
 func saveToken(path, token string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	return os.WriteFile(path, []byte(token+"\n"), 0o600)
+	return writePrivateFile(path, token+"\n")
 }
 
 // -----------------------------------------------------------------------------
