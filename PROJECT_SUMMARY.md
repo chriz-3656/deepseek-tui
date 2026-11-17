@@ -199,9 +199,11 @@ there is no syntax highlighting yet.
 > **Withdrawn builds:** the `v0.1.0`–`v0.3.0` GitHub releases and tags were
 > deleted on 2026-11-17. Those binaries embedded a shared device id and fixed
 > locale, timezone, and user-agent values, giving every installation the same
-> client identity. `v0.3.1` is the only supported release. The repository
-> history was rewritten and force-pushed on 2026-11-17 to purge the old
-> identifier from every commit. Build only from `v0.3.1` or later.
+> client identity. `v0.3.1` was removed when `v0.4.0` shipped, so only the
+> latest release stays published; its identity fixes are included in
+> `v0.4.0`. The repository history was rewritten and force-pushed on
+> 2026-11-17 to purge the old identifier from every commit. Build only from
+> `v0.4.0`.
 
 Supporting commits:
 
@@ -622,33 +624,38 @@ On a `v*` tag, the release job also:
 - writes `checksums.txt` with SHA-256 sums;
 - creates or updates the GitHub release.
 
-### Released assets for v0.3.1
+### Released assets for v0.4.0
 
-Earlier releases and tags were deleted on 2026-11-17; v0.3.1 is the only
+Earlier releases and tags were deleted on 2026-11-17; v0.4.0 is the only
 published build.
 
-- `checksums.txt`
-- `deepseek-tui-linux-amd64` (~7.2 MB)
-- `deepseek-tui-linux-arm64` (~6.8 MB)
-- `deepseek-tui-darwin-amd64` (~7.4 MB)
-- `deepseek-tui-darwin-arm64` (~7.0 MB)
-- `deepseek-tui-windows-amd64.exe` (~7.4 MB)
+- `checksums.txt` (463 bytes)
+- `deepseek-tui-linux-amd64` (7,327,928 bytes)
+- `deepseek-tui-linux-arm64` (6,947,000 bytes)
+- `deepseek-tui-darwin-amd64` (7,488,160 bytes)
+- `deepseek-tui-darwin-arm64` (7,059,442 bytes)
+- `deepseek-tui-windows-amd64.exe` (7,544,320 bytes)
 
 ## 8. Verification performed
 
+- v0.4.0: push CI (`44013384870`), docs CI (`44013630785`), and tag release
+  (`44013720900`) passed. All five binaries matched the SHA-256 digests in
+  `checksums.txt`; the Linux amd64 binary reported `deepseek-tui v0.4.0`.
+- A `strings` audit of the v0.4.0 Linux binary found no historical device
+  UUID, no repository handle or numeric account id, no `vcs.revision`/
+  `vcs.modified`, and no fixed timezone offset. Build info reports
+  `path deepseek-tui` and `-trimpath=true`.
 - v0.3.1: push CI and tag release both passed; all six assets matched their
   published SHA-256 digests; the Linux binary reported `deepseek-tui v0.3.1`.
 - A `strings` audit of the v0.3.1 Linux binary found no shared device UUID, no
   repository handle, no `vcs.revision`/`vcs.time`, and no fixed timezone
   offline. Build info reports `path deepseek-tui`.
-- CI passed on the recent-chats commit:
+- CI passed on the Markdown commit and the docs commit:
   - tidy check;
   - vet;
-  - race tests;
+  - race tests, including the new Markdown renderer and view tests;
   - build;
   - version smoke test.
-- Tag release pipeline passed; all platform assets and checksums were
-  published.
 - The v0.2.0 Linux release binary reported:
 
   ```text
