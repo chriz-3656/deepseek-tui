@@ -39,6 +39,9 @@ enter send · ctrl+n new chat · pgup/pgdown scroll · ctrl+c quit
   bracketed paste.
 - Tolerant response decoding: flat `{"id": ...}` and the production
   `data.biz_data...` envelope both work.
+- Assistant replies rendered as terminal Markdown: headings, emphasis,
+  inline code, links, lists and task lists, blockquotes, rules, tables, and
+  fenced code blocks that keep their indentation and language tag.
 
 ## Requirements
 
@@ -149,6 +152,19 @@ at startup:
 
 No device id, locale, timezone, or user agent is baked into the executable.
 
+## Rendering
+
+Assistant replies are parsed as Markdown and laid out for the current
+viewport width. Code fences preserve indentation and tabs, show their
+language tag, and truncate overlong lines instead of reflowing them. Tables
+are drawn with box borders and fall back to compact rows on narrow terminals.
+Inline styles are applied after wrapping, so ANSI color codes never break the
+layout.
+
+Control characters are stripped before rendering, so model output cannot
+inject terminal escapes. Syntax highlighting inside code blocks is not
+implemented; images and raw HTML are shown as text.
+
 ## Proof-of-work details
 
 `DeepSeekHashV1` is not SHA3-256 and not standard Keccak-256. The permutation
@@ -177,6 +193,7 @@ a40318e6b7af56bf27cf_1790959021012_58595
 
 ```
 main.go      Bubble Tea model/update/view, auth, text wrapping, styles
+markdown.go  Markdown parser, tables, code fences, styled wrapping, render cache
 clientenv.go per-install device id, locale, timezone, user agent, private files
 api.go       HTTP client, envelopes, PoW response header, SSE parser
 pow.go       Keccak-f[1600] 23-round permutation, DeepSeekHashV1, solver

@@ -1,9 +1,6 @@
 # deepseek-tui — Project Summary
 
-> Status snapshot: **2026-11-17**  
-> Latest release: **v0.3.1**  
-> Language: **Go 1.24.2**  
-> License: **MIT**
+> Status snapshot: **2026-11-17** · Latest release: **v0.4.0** · Language: **Go 1.24.2** · License: **MIT**
 
 ## 1. Project at a glance
 
@@ -18,6 +15,8 @@ The application provides:
 - multi-turn conversations using server-side session state;
 - a recent-chats drawer with history restoration, pagination, switching, and
   deletion;
+- Markdown-rendered assistant replies with headings, lists, tables, and
+  fenced code blocks;
 - token discovery and an in-TUI token entry screen;
 - cross-platform release binaries for Linux, macOS, and Windows.
 
@@ -36,7 +35,7 @@ Repository: `https://github.com/chriz-3656/deepseek-tui`
   - adaptive light/dark colors.
 - Streaming assistant output:
   - `THINK` fragments rendered dim and italic;
-  - `RESPONSE` fragments rendered as the answer;
+  - `RESPONSE` fragments rendered through the Markdown renderer;
   - a cursor block while text is arriving.
 - Status progression for:
   - creating a chat session;
@@ -167,6 +166,25 @@ Protocol constants remain fixed because they belong to DeepSeek's web client:
 `x-client-version: 2.8.0`, `x-client-bundle-id: com.deepseek.chat`, the API
 base URL, and the completion target path.
 
+### 2.9 Markdown rendering
+
+Assistant messages are rendered as terminal Markdown by `markdown.go`:
+
+- headings, with an underline for level 1;
+- bold, italic, strikethrough, inline code, links, and autolinks;
+- ordered, unordered, and task lists with nested indentation;
+- blockquotes and horizontal rules;
+- GitHub-style pipe tables with alignment and box borders, plus a compact
+  fallback on narrow terminals;
+- fenced code blocks (backticks or tildes) with a language label, preserved
+  indentation, expanded tabs, and truncation for overlong lines.
+
+Styling is applied after word wrapping, so ANSI sequences never corrupt the
+layout. Open code fences render as code during streaming. Rendered replies
+are cached by content length and width, and terminal control characters are
+removed before display. Images, raw HTML, and LaTeX are shown as plain text;
+there is no syntax highlighting yet.
+
 ## 3. Release history
 
 | Tag | Commit | Date | Highlights |
@@ -176,6 +194,7 @@ base URL, and the completion target path.
 | `v0.2.0` | `36b6aba` | 2026-11-16 | Recent chats: list, paginate, switch, restore history, delete |
 | `v0.3.0` | `b8ee9e8` | 2026-11-17 | Masked token input with `ctrl+r` reveal/hide |
 | `v0.3.1` | `f0a99bf` | 2026-11-17 | Per-install device id, derived locale/timezone/user agent, neutral build metadata |
+| `v0.4.0` | `b22a497` | 2026-11-17 | Terminal Markdown rendering: headings, lists, tables, code fences, inline styles |
 
 > **Withdrawn builds:** the `v0.1.0`–`v0.3.0` GitHub releases and tags were
 > deleted on 2026-11-17. Those binaries embedded a shared device id and fixed
@@ -196,6 +215,7 @@ Supporting commits:
 | `36b6aba` | Recent-chats feature |
 | `b8ee9e8` | Masked token input with `ctrl+r` toggle |
 | `f0a99bf` | Runtime client identity, atomic private files, neutral build metadata |
+| `b22a497` | Dependency-free Markdown renderer and render cache |
 
 ## 4. What was fixed
 
@@ -491,9 +511,11 @@ The field is singular and holds one string, not an array.
 | File | Responsibility |
 | --- | --- |
 | `main.go` | Bubble Tea model, update loop, views, authentication, recent-chats overlay, text layout, styles, entry point |
+| `markdown.go` | Dependency-free Markdown block parser, inline styles, tables, code fences, styled wrapping, render cache |
 | `api.go` | HTTP client, headers, envelopes, session/history/delete calls, PoW submission, SSE parser |
 | `pow.go` | Keccak-f[1600] 23-round permutation, `DeepSeekHashV1`, parallel solver |
-| `main_test.go` | Text wrapping, resize/view, auth input, recent-chat switching, delete-current behavior |
+| `main_test.go` | Text wrapping, resize/view, auth input, Markdown view integration, recent-chat switching, delete-current behavior |
+| `markdown_test.go` | Headings, inline styles, lists, tasks, quotes, tables, code fences, width limits, sanitization, cache invalidation |
 | `api_test.go` | Envelope shapes, PoW header, SSE protocols, pagination, history shapes, delete |
 | `pow_test.go` | Captured hash vectors, captured challenge solve, invalid challenge rejection |
 | `README.md` | User-facing usage, key bindings, API flow, PoW notes |
@@ -675,14 +697,15 @@ published build.
 
 ### Rendering
 
-- No Markdown rendering yet.
-- Prose and code currently share the same wrapper.
-- `wrapText` uses `strings.Fields`, which collapses indentation and repeated
-  spaces. Fenced code blocks therefore lose their formatting and show literal
-  backticks/language tags.
-- Long lines are clipped by the viewport; there is no horizontal scroll.
-- No syntax highlighting.
-- No inline-code styling, tables, headings, links, or LaTeX handling.
+- Assistant replies use the built-in Markdown renderer; user and system text
+  stay plain.
+- No syntax highlighting inside fenced code blocks.
+- Images and raw HTML render as text.
+- Long code lines are truncated with an ellipsis; there is no horizontal
+  scroll or copy-friendly code pane.
+- Wide tables fall back to compact rows on narrow terminals.
+- Nested emphasis and some link edge cases are simplified.
+- No LaTeX rendering.
 
 ### Platform and operations
 
@@ -696,105 +719,33 @@ published build.
 
 ## 10. Future work
 
-### 10.1 Next priority: lightweight code-only Markdown rendering
+### 10.1 Implemented: Markdown rendering
 
-**Goal:** format code snippets from DeepSeek without turning the whole chat
-into a Markdown document.
+Shipped in v0.4.0 as a dependency-free renderer in `markdown.go`:
 
-#### Problem
+- block parsing for headings, horizontal rules, fenced code (backticks and
+  tildes), blockquotes, ordered/unordered/task lists, and GFM tables;
+- inline parsing for bold, italic, strikethrough, inline code, links,
+  autolinks, and backslash escapes;
+- styled spans wrapped to the viewport width before ANSI styling is applied;
+- code blocks with language labels, preserved indentation, expanded tabs, and
+  truncation for overlong lines;
+- open fences treated as code while a reply is streaming;
+- rendered messages cached by content length and width;
+- control characters stripped from all rendered text.
 
-The current renderer sends the entire assistant message through `wrapText`.
-That function reflows paragraphs with `strings.Fields`, so it:
+Dependency decision: a custom scanner plus Lip Gloss was chosen because it
+keeps the binary static and avoids new modules. Chroma remains the best option
+for syntax highlighting later, subject to its Go version floor. Glamour was
+rejected: v1 pulls in Chroma/Goldmark and a newer Lip Gloss, while v2 requires
+Go 1.25 and Lip Gloss v2.
 
-- removes code indentation and tabs;
-- collapses repeated internal spaces;
-- wraps code as if it were prose;
-- leaves code-fence markers and language tags visible.
-
-#### Recommended design
-
-1. Split assistant text into prose and fenced code segments.
-2. Keep prose on the existing wrapping path.
-3. Render code segments with a dedicated code path:
-   - preserve whitespace, blank lines, and indentation;
-   - expand tabs for predictable terminal width;
-   - show the language tag;
-   - use a subtle background or a thin left rule instead of a full border, so
-     copied code is not polluted with border characters;
-   - truncate overlong lines with an ANSI-aware ellipsis;
-   - do not reflow code.
-4. Optionally add syntax coloring later.
-
-Suggested fence handling:
-
-- accept triple backticks or tildes;
-- allow up to three leading spaces;
-- support an optional language/info string;
-- handle multiple blocks in one message;
-- treat an unterminated fence during streaming as a code block until closed;
-- leave inline backticks and prose untouched in the first version.
-
-#### Dependency options researched
-
-| Option | Fit | Constraints |
-| --- | --- | --- |
-| Custom fence scanner + `lipgloss` | **Recommended for lightweight, code-only rendering** | No new modules; uses existing Lip Gloss and `charmbracelet/x/ansi` already present indirectly |
-| `alecthomas/chroma/v2` | **Best if syntax colors are required** | Use v2.21.1 for Go 1.22 compatibility; latest v2.26/v2.27 require Go 1.25+, above the current Go 1.24.2; adds embedded lexers and `regexp2` |
-| `charmbracelet/glamour` v1 | Not ideal for “code only” | Renders full Markdown; pulls in Chroma, Goldmark, Bluemonday, Reflow; v1.0.0 raises Lip Gloss to a pseudo-version newer than the pinned v1.1.0 |
-| `charmbracelet/glamour` v2 | Avoid for now | Module is `charm.land/glamour/v2`; requires Go 1.25.8 and Lip Gloss v2.0.4, which is a major dependency migration |
-| Goldmark + custom renderer | Not worth it | Still requires writing the terminal/code renderer; more parts than a fence scanner |
-
-Useful facts:
-
-- Current stack: Go 1.24.2, Bubble Tea v1.3.10, Lip Gloss v1.1.0.
-- `charmbracelet/x/ansi` v0.11.6 is already an indirect dependency and offers
-  ANSI-aware `Strip`, `Truncate`, `Hardwrap`, `Wordwrap`, and `StringWidth`.
-- `lipgloss.ColorProfile()` can select the Chroma formatter:
-  - truecolor → `terminal16m`;
-  - 256-color → `terminal256`;
-  - 16-color → `terminal16`;
-  - no color → plain text.
-
-#### Streaming and performance
-
-- Highlight only **closed** code fences while streaming.
-- Render the currently open fence as plain preserved code.
-- Re-highlight at `evDone` when the final content is known.
-- Cache rendered blocks by language + code + width.
-- Do not run Chroma over the whole transcript on every token.
-- Keep the existing “scroll to bottom if already at bottom” behavior.
-
-#### Test cases
-
-- indentation and tabs preserved;
-- multiple code blocks;
-- missing language tag;
-- unterminated fence during streaming;
-- prose wrapping unchanged;
-- long lines truncated without breaking ANSI escapes;
-- width changes recalculate layout;
-- code blocks in assistant replies and, if enabled, thinking text;
-- no regression in recent-chats and auth overlays.
-
-#### Acceptance criteria
-
-- A fenced Go/Python/JSON snippet keeps its exact indentation and blank lines.
-- The language label is visible.
-- Prose outside the fence still wraps as before.
-- Long code lines do not break the viewport or corrupt ANSI colors.
-- Streaming does not noticeably slow down.
-- The feature remains a single static Go binary.
-
-#### Suggested phasing
-
-1. **Phase 1:** code-only framing, whitespace preservation, language label,
-   truncation. No new dependencies.
-2. **Phase 2:** optional Chroma syntax highlighting, formatter selection,
-   caching, and color-theme tuning.
+Remaining work: syntax coloring, image/link previews, LaTeX, and richer
+nested emphasis.
 
 ### 10.2 Near-term improvements
 
-- Inline-code styling and optional full Markdown rendering for prose.
+- Syntax highlighting for fenced code blocks.
 - Horizontal scrolling or a copy-friendly code view.
 - Session management: rename, pin, delete all, search, export.
 - Message actions: retry, regenerate, stop/cancel, edit last prompt.
