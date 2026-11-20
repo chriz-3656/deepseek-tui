@@ -66,8 +66,12 @@ func NewAPIClient(token string) *APIClient {
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 60 * time.Second,
 	}
+	baseURL := apiBaseURL
+	if envBase := strings.TrimRight(strings.TrimSpace(os.Getenv("DEEPSEEK_BASE_URL")), "/"); envBase != "" {
+		baseURL = envBase
+	}
 	return &APIClient{
-		baseURL:   apiBaseURL,
+		baseURL:   baseURL,
 		token:     token,
 		deviceID:  resolveDeviceID(),
 		locale:    systemLocale(),
