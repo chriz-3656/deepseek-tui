@@ -190,7 +190,7 @@ func TestCLIExportNoToken(t *testing.T) {
 }
 
 func TestCLIAttachFileMissing(t *testing.T) {
-	_, stderr, code := runCLI(t, nil, "--file", "/nonexistent/path/for/sure/file.txt", "hello")
+	_, stderr, code := runCLI(t, nil, "--token", "dummy-token-for-test", "--file", "/nonexistent/path/for/sure/file.txt", "hello")
 	if code != 1 {
 		t.Fatalf("expected exit code 1, got %d, stderr: %s", code, stderr)
 	}
