@@ -23,6 +23,15 @@ enter send · ctrl+n new chat · pgup/pgdown scroll · ctrl+c quit
 
 - Bubble Tea TUI: header status, scrollable chat history, streaming output,
   spinner while connecting, inline proof-of-work progress.
+- DeepThink & Web Search Toggles: hotkeys `ctrl+d` (toggle reasoning mode) and
+  `ctrl+s` (toggle web search retrieval) with live status badges `[think]` and
+  `[search]`.
+- Mid-Stream Cancellation: press `esc` during streaming to abort in-flight
+  generation immediately without losing prior chat history or exiting.
+- Conversation History Export: export entire chat sessions with reasoning blocks
+  to clean Markdown using `e` in the recent chats drawer or `--export <id>` via CLI.
+- Document & File Attachments: attach local files/documents directly using
+  `-f, --file <path>` in CLI or `/file <path> <prompt>` in the TUI input box.
 - Dual-mode binary: no arguments opens the TUI; prompt arguments run a
   non-interactive one-shot query, with `-c`/`--code` printing only fenced code
   blocks and `--first`/`--lang` selecting output.
@@ -85,6 +94,25 @@ Select only the first block, or filter by language:
 ./deepseek-tui --lang bash,sh "write a shell script"
 ```
 
+Attach a local file or document to the query:
+
+```bash
+./deepseek-tui -f /path/to/report.pdf "summarize key points"
+```
+
+Export an existing conversation to Markdown:
+
+```bash
+./deepseek-tui -e <session-id> > chat.md
+```
+
+Control reasoning mode and web search retrieval:
+
+```bash
+./deepseek-tui --think "solve this logic puzzle step by step"
+./deepseek-tui --no-search "explain quicksort in Go"
+```
+
 `--first` and `--lang` imply `-c`. Language names are matched
 case-insensitively; `shell` matches `sh`, `bash`, `zsh`, and `fish`, and common
 pairs such as `js`/`javascript`, `py`/`python`, `ts`/`typescript`, and
@@ -133,17 +161,20 @@ by default; `ctrl+r` on the token screen shows or hides it.
 | Key | Action |
 | --- | --- |
 | `enter` | send the current message / save the token / open the selected chat |
-| `ctrl+r` | open recent chats |
+| `ctrl+d` | toggle DeepThink reasoning mode (`[think]` / `[think:off]`) |
+| `ctrl+s` | toggle Web Search retrieval (`[search]` / `[search:off]`) |
+| `esc` | stop/cancel active streaming response / close recent chats |
+| `ctrl+r` | open recent chats drawer |
 | `ctrl+n` | start a new chat session |
 | `ctrl+t` | change the DeepSeek token |
 | `pgup` / `pgdown` | scroll history (chat) / move by a page (recent chats) |
 | `up` / `down` | scroll history (chat) / select a chat (recent chats) |
 | `home` / `end` | jump to top / bottom (chat) / first / last chat (recent chats) |
-| `esc` | close recent chats |
 | `ctrl+c` | quit |
 
-Inside recent chats: `r` refreshes the list, `l` loads the next page, `n`
-starts a new chat, and `d` deletes the selected chat after `y` confirmation.
+Inside recent chats: `e` exports the chat to a local `./<title>.md` Markdown file, `r` refreshes the list, `l` loads the next page, `n` starts a new chat, and `d` deletes the selected chat after `y` confirmation.
+
+Attaching files: drag and drop any file directly into the terminal window, or type `/file <path> <optional prompt>` to upload and attach a local document to your message.
 
 On the token screen, `ctrl+r` toggles between masked and visible input.
 

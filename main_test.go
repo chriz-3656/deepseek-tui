@@ -300,3 +300,260 @@ func TestRecentChatsDeleteCurrent(t *testing.T) {
 		t.Fatalf("unexpected recent state: open=%v notice=%q", m.recentOpen, m.recentNotice)
 	}
 }
+
+func TestToggleThinkingAndSearchInTUI(t *testing.T) {
+	m := newModel("test-token")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(*model)
+
+	if !m.thinkingEnabled || !m.searchEnabled {
+		t.Fatalf("expected defaults to be true, got think=%v search=%v", m.thinkingEnabled, m.searchEnabled)
+	}
+	if view := m.View(); !strings.Contains(view, "[think]") || !strings.Contains(view, "[search]") {
+		t.Fatalf("view missing active badges: %q", view)
+	}
+
+	// Toggle thinking off
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+	m = updated.(*model)
+	if m.thinkingEnabled {
+		t.Fatal("ctrl+d did not toggle thinking off")
+	}
+	if view := m.View(); !strings.Contains(view, "[think:off]") {
+		t.Fatalf("view missing [think:off]: %q", view)
+	}
+
+	// Toggle search off
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	m = updated.(*model)
+	if m.searchEnabled {
+		t.Fatal("ctrl+s did not toggle search off")
+	}
+	if view := m.View(); !strings.Contains(view, "[search:off]") {
+		t.Fatalf("view missing [search:off]: %q", view)
+	}
+
+	// Toggle thinking back on
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+	m = updated.(*model)
+	if !m.thinkingEnabled {
+		t.Fatal("ctrl+d did not toggle thinking on")
+	}
+	if view := m.View(); !strings.Contains(view, "[think]") {
+		t.Fatalf("view missing [think]: %q", view)
+	}
+}
+
+func TestStreamCancellationOnEsc(t *testing.T) {
+	m := newModel("test-token")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(*model)
+
+	// Simulate user prompt and entering streaming mode
+	m.messages = append(m.messages, chatMessage{kind: msgUser, text: "test"})
+	m.messages = append(m.messages, chatMessage{kind: msgAssistant})
+	m.streaming = true
+	canceled := false
+	m.cancelStream = func() {
+		canceled = true
+	}
+
+	// Press Esc while streaming
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(*model)
+
+	if !canceled {
+		t.Fatal("cancelStream was not invoked on Esc")
+	}
+	if m.cancelStream != nil {
+		t.Fatal("cancelStream was not cleared")
+	}
+
+	// Receive evCanceled
+	m.handleStreamEvent(streamEvent{kind: evCanceled})
+	if m.streaming {
+		t.Fatal("model should no longer be streaming after evCanceled")
+	}
+	if m.status != "canceled" {
+		t.Fatalf("status = %q, want canceled", m.status)
+	}
+}
+
+func TestTUIFileAttachmentCommand(t *testing.T) {
+	tmp, err := os.CreateTemp("", "tui-attach-*.txt")
+	if err != nil {
+		t.Fatalf("create temp file: %v", err)
+	}
+	defer os.Remove(tmp.Name())
+	tmp.WriteString("hello file")
+	tmp.Close()
+
+	m := newModel("test-token")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(*model)
+
+	// Enter /file command
+	m.input.SetValue("/file " + tmp.Name() + " explain this file")
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(*model)
+
+	if !m.streaming {
+		t.Fatal("expected model to start streaming after enter")
+	}
+	if len(m.messages) < 2 {
+		t.Fatalf("expected at least 2 messages, got %d", len(m.messages))
+	}
+	userMsg := m.messages[0].text
+	if !strings.Contains(userMsg, "[attached: "+filepath.Base(tmp.Name())+"]") {
+		t.Fatalf("expected attached badge in user message, got %q", userMsg)
+	}
+	if !strings.Contains(userMsg, "explain this file") {
+		t.Fatalf("expected prompt in user message, got %q", userMsg)
+	}
+	if cmd == nil {
+		t.Fatal("expected tea.Batch command to be returned")
+	}
+
+	// Test non-existent file shows status error
+	m2 := newModel("test-token")
+	m2.input.SetValue("/file /non/existent/file.pdf hello")
+	updated2, cmd2 := m2.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m2 = updated2.(*model)
+	if m2.streaming {
+		t.Fatal("model should not start streaming on invalid file")
+	}
+	if !strings.Contains(m2.status, "file error") {
+		t.Fatalf("status = %q, want file error", m2.status)
+	}
+	if cmd2 != nil {
+		t.Fatal("command should be nil on error")
+	}
+}
+
+func TestTUIDragAndDropAutoFormat(t *testing.T) {
+	tmp, err := os.CreateTemp("", "tui-dnd-*.pdf")
+	if err != nil {
+		t.Fatalf("create temp file: %v", err)
+	}
+	defer os.Remove(tmp.Name())
+	tmp.Close()
+
+	m := newModel("test-token")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(*model)
+
+	// Simulate drag and drop paste of a quoted file URI
+	droppedURI := "'file://" + tmp.Name() + "'"
+	m.input.SetValue(droppedURI)
+	// Trigger any non-enter key (such as space or cursor move)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	m = updated.(*model)
+
+	wantPrefix := "/file " + tmp.Name() + " "
+	if m.input.Value() != wantPrefix {
+		t.Fatalf("input value = %q, want %q", m.input.Value(), wantPrefix)
+	}
+	if !strings.Contains(m.status, "attached: "+filepath.Base(tmp.Name())) {
+		t.Fatalf("status = %q, want attached message", m.status)
+	}
+}
+
+func TestTUIDragAndDropDirectEnter(t *testing.T) {
+	tmp, err := os.CreateTemp("", "tui-dnd-enter-*.txt")
+	if err != nil {
+		t.Fatalf("create temp file: %v", err)
+	}
+	defer os.Remove(tmp.Name())
+	tmp.WriteString("file content")
+	tmp.Close()
+
+	m := newModel("test-token")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(*model)
+
+	// User drops file and immediately presses Enter (without typing /file)
+	m.input.SetValue("'" + tmp.Name() + "'")
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(*model)
+
+	if !m.streaming {
+		t.Fatal("expected model to start streaming after dropping file and pressing enter")
+	}
+	if len(m.messages) < 2 {
+		t.Fatalf("expected at least 2 messages, got %d", len(m.messages))
+	}
+	userMsg := m.messages[0].text
+	if !strings.Contains(userMsg, "[attached: "+filepath.Base(tmp.Name())+"]") {
+		t.Fatalf("expected attached badge, got %q", userMsg)
+	}
+	if !strings.Contains(userMsg, "Analyze the attached file.") {
+		t.Fatalf("expected default prompt, got %q", userMsg)
+	}
+	if cmd == nil {
+		t.Fatal("expected tea.Batch command to be returned")
+	}
+}
+
+func TestParseFileAndPromptCases(t *testing.T) {
+	tmp, err := os.CreateTemp("", "test-file-*.txt")
+	if err != nil {
+		t.Fatalf("create temp file: %v", err)
+	}
+	defer os.Remove(tmp.Name())
+	tmp.Close()
+
+	cases := []struct {
+		input      string
+		wantOK     bool
+		wantFile   string
+		wantPrompt string
+	}{
+		{
+			input:      tmp.Name(),
+			wantOK:     true,
+			wantFile:   tmp.Name(),
+			wantPrompt: "Analyze the attached file.",
+		},
+		{
+			input:      "'" + tmp.Name() + "'",
+			wantOK:     true,
+			wantFile:   tmp.Name(),
+			wantPrompt: "Analyze the attached file.",
+		},
+		{
+			input:      "'file://" + tmp.Name() + "'",
+			wantOK:     true,
+			wantFile:   tmp.Name(),
+			wantPrompt: "Analyze the attached file.",
+		},
+		{
+			input:      "'" + tmp.Name() + "' please review this code",
+			wantOK:     true,
+			wantFile:   tmp.Name(),
+			wantPrompt: "please review this code",
+		},
+		{
+			input:      "regular chat prompt without any files",
+			wantOK:     false,
+			wantPrompt: "regular chat prompt without any files",
+		},
+		{
+			input:      "cat is a cute pet",
+			wantOK:     false,
+			wantPrompt: "cat is a cute pet",
+		},
+	}
+
+	for _, tc := range cases {
+		file, prompt, ok := parseFileAndPrompt(tc.input)
+		if ok != tc.wantOK {
+			t.Errorf("input=%q: ok=%v, want=%v", tc.input, ok, tc.wantOK)
+		}
+		if ok && file != tc.wantFile {
+			t.Errorf("input=%q: file=%q, want=%q", tc.input, file, tc.wantFile)
+		}
+		if prompt != tc.wantPrompt {
+			t.Errorf("input=%q: prompt=%q, want=%q", tc.input, prompt, tc.wantPrompt)
+		}
+	}
+}

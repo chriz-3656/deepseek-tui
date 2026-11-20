@@ -9,9 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +25,7 @@ const (
 	clientVersion       = "2.8.0"
 	clientBundleID      = "com.deepseek.chat"
 	completionTargetURL = "/api/v0/chat/completion"
+	uploadTargetURL     = "/api/v0/file/upload_file"
 )
 
 // APIError is a structured upstream failure from chat.deepseek.com.
@@ -163,11 +167,13 @@ func decodeEnvelopeData(rawBody, data json.RawMessage, out any) error {
 			BizMsg  string          `json:"biz_msg"`
 			BizData json.RawMessage `json:"biz_data"`
 		}
-		if err := json.Unmarshal(data, &nested); err == nil && len(nested.BizData) > 0 && !bytes.Equal(bytes.TrimSpace(nested.BizData), []byte("null")) {
+		if err := json.Unmarshal(data, &nested); err == nil {
 			if nested.BizCode != 0 {
 				return &APIError{Code: nested.BizCode, Message: nested.BizMsg}
 			}
-			return json.Unmarshal(nested.BizData, out)
+			if len(nested.BizData) > 0 && !bytes.Equal(bytes.TrimSpace(nested.BizData), []byte("null")) {
+				return json.Unmarshal(nested.BizData, out)
+			}
 		}
 		return json.Unmarshal(data, out)
 	}
@@ -336,6 +342,53 @@ type ChatHistory struct {
 	Messages         []HistoryMessage
 }
 
+// ToMarkdown formats the entire conversation as clean, readable Markdown.
+func (h *ChatHistory) ToMarkdown() string {
+	if h == nil {
+		return ""
+	}
+	var b strings.Builder
+	title := strings.TrimSpace(h.Title)
+	if title == "" {
+		title = "Untitled Chat"
+	}
+	b.WriteString("# " + title + "\n\n")
+
+	for i, msg := range h.Messages {
+		role := strings.ToUpper(strings.TrimSpace(msg.Role))
+		switch role {
+		case "USER":
+			text := msg.UserText()
+			if text == "" {
+				continue
+			}
+			if i > 0 {
+				b.WriteString("\n---\n\n")
+			}
+			b.WriteString("### User\n\n" + text + "\n")
+		case "ASSISTANT":
+			text := msg.AssistantText()
+			thinking := msg.AssistantThinking()
+			if text == "" && thinking == "" {
+				continue
+			}
+			if i > 0 {
+				b.WriteString("\n---\n\n")
+			}
+			b.WriteString("### DeepSeek\n\n")
+			if thinking != "" {
+				b.WriteString("<details>\n<summary>Thinking Process</summary>\n\n")
+				b.WriteString(thinking + "\n\n")
+				b.WriteString("</details>\n\n")
+			}
+			if text != "" {
+				b.WriteString(text + "\n")
+			}
+		}
+	}
+	return b.String()
+}
+
 // FetchHistory loads every message of one chat session.
 func (c *APIClient) FetchHistory(ctx context.Context, sessionID string) (*ChatHistory, error) {
 	values := url.Values{}
@@ -436,6 +489,11 @@ func (c *APIClient) CreateSession(ctx context.Context) (string, error) {
 
 // CreatePowChallenge fetches a proof-of-work challenge for /chat/completion.
 func (c *APIClient) CreatePowChallenge(ctx context.Context) (*PowChallenge, error) {
+	return c.CreatePowChallengeForPath(ctx, completionTargetURL)
+}
+
+// CreatePowChallengeForPath fetches a proof-of-work challenge for any target endpoint path.
+func (c *APIClient) CreatePowChallengeForPath(ctx context.Context, targetPath string) (*PowChallenge, error) {
 	var out struct {
 		Challenge  json.RawMessage `json:"challenge"`
 		Salt       string          `json:"salt"`
@@ -445,7 +503,7 @@ func (c *APIClient) CreatePowChallenge(ctx context.Context) (*PowChallenge, erro
 		Signature  string          `json:"signature"`
 		TargetPath string          `json:"target_path"`
 	}
-	if err := c.postJSON(ctx, "/chat/create_pow_challenge", map[string]string{"target_path": completionTargetURL}, &out); err != nil {
+	if err := c.postJSON(ctx, "/chat/create_pow_challenge", map[string]string{"target_path": targetPath}, &out); err != nil {
 		return nil, err
 	}
 
@@ -492,9 +550,115 @@ func (c *APIClient) CreatePowChallenge(ctx context.Context) (*PowChallenge, erro
 		return nil, errors.New("pow: incomplete challenge from server")
 	}
 	if challenge.TargetPath == "" {
-		challenge.TargetPath = completionTargetURL
+		challenge.TargetPath = targetPath
 	}
 	return &challenge, nil
+}
+
+// UploadFile uploads a local document or file to DeepSeek's file service and returns the file ID.
+func (c *APIClient) UploadFile(ctx context.Context, filePath string) (string, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return "", fmt.Errorf("open file: %w", err)
+	}
+	defer file.Close()
+
+	stat, err := file.Stat()
+	if err != nil {
+		return "", fmt.Errorf("stat file: %w", err)
+	}
+	if stat.IsDir() {
+		return "", fmt.Errorf("cannot upload directory %q", filePath)
+	}
+	const maxUploadSize = 50 << 20 // 50MB
+	if stat.Size() > maxUploadSize {
+		return "", fmt.Errorf("file size %d exceeds 50MB limit", stat.Size())
+	}
+
+	challenge, err := c.CreatePowChallengeForPath(ctx, uploadTargetURL)
+	if err != nil {
+		return "", fmt.Errorf("pow challenge: %w", err)
+	}
+
+	answer, err := challenge.Solve(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("solve proof-of-work: %w", err)
+	}
+
+	powHeader, err := powResponseHeader(challenge, answer)
+	if err != nil {
+		return "", err
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", filepath.Base(filePath))
+	if err != nil {
+		return "", fmt.Errorf("create form file: %w", err)
+	}
+	if _, err := io.Copy(part, file); err != nil {
+		return "", fmt.Errorf("copy file data: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return "", fmt.Errorf("close multipart writer: %w", err)
+	}
+
+	req, err := c.newRequest(ctx, http.MethodPost, "/file/upload_file", body.Bytes())
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("x-ds-pow-response", powHeader)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", apiErrorFromBody(resp.StatusCode, raw)
+	}
+
+	var env apiEnvelope
+	var targetRaw json.RawMessage = raw
+	if err := json.Unmarshal(raw, &env); err == nil && (env.Code != 0 || env.Msg != "" || len(env.Data) > 0) {
+		if env.Code != 0 {
+			return "", &APIError{Status: resp.StatusCode, Code: env.Code, Message: env.Msg}
+		}
+		targetRaw = env.Data
+	}
+
+	var fileResp struct {
+		ID      string `json:"id"`
+		FileID  string `json:"file_id"`
+		BizData struct {
+			ID     string `json:"id"`
+			FileID string `json:"file_id"`
+		} `json:"biz_data"`
+	}
+	if err := decodeEnvelopeData(raw, targetRaw, &fileResp); err != nil {
+		return "", fmt.Errorf("decode upload response: %w", err)
+	}
+
+	id := fileResp.ID
+	if id == "" {
+		id = fileResp.FileID
+	}
+	if id == "" {
+		id = fileResp.BizData.ID
+	}
+	if id == "" {
+		id = fileResp.BizData.FileID
+	}
+	if id == "" {
+		return "", errors.New("deepseek: upload response did not contain a file ID")
+	}
+	return id, nil
 }
 
 // CompletionRequest describes one turn in a chat session.
@@ -502,8 +666,11 @@ type CompletionRequest struct {
 	SessionID       string
 	ParentMessageID *int64
 	Prompt          string
+	RefFileIDs      []string
+	RefFilePath     string
 	FirstTurn       bool
 	ThinkingEnabled bool
+	SearchEnabled   bool
 }
 
 // StreamEventKind identifies what a streamed event carries.
@@ -560,6 +727,10 @@ func (c *APIClient) Complete(ctx context.Context, req CompletionRequest, hooks C
 		mt := "default"
 		modelType = &mt
 	}
+	refIDs := req.RefFileIDs
+	if refIDs == nil {
+		refIDs = []string{}
+	}
 	payload := struct {
 		ChatSessionID   string   `json:"chat_session_id"`
 		ParentMessageID *int64   `json:"parent_message_id"`
@@ -575,9 +746,9 @@ func (c *APIClient) Complete(ctx context.Context, req CompletionRequest, hooks C
 		ParentMessageID: req.ParentMessageID,
 		ModelType:       modelType,
 		Prompt:          req.Prompt,
-		RefFileIDs:      []string{},
+		RefFileIDs:      refIDs,
 		ThinkingEnabled: req.ThinkingEnabled,
-		SearchEnabled:   true,
+		SearchEnabled:   req.SearchEnabled,
 		Preempt:         false,
 	}
 

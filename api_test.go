@@ -5,8 +5,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -415,5 +418,94 @@ func TestDeleteSession(t *testing.T) {
 	client.baseURL = server.URL
 	if err := client.DeleteSession(context.Background(), "session-1"); err != nil {
 		t.Fatalf("delete session: %v", err)
+	}
+}
+
+func TestChatHistoryToMarkdown(t *testing.T) {
+	history := &ChatHistory{
+		Title: "Test Chat",
+		Messages: []HistoryMessage{
+			{Role: "USER", Fragments: []HistoryFragment{{Type: "REQUEST", Content: "Hello world"}}},
+			{Role: "ASSISTANT", Fragments: []HistoryFragment{
+				{Type: "THINK", Content: "thinking process here"},
+				{Type: "RESPONSE", Content: "assistant response here"},
+			}},
+		},
+	}
+	md := history.ToMarkdown()
+	for _, want := range []string{"# Test Chat", "### User", "Hello world", "### DeepSeek", "thinking process here", "assistant response here", "<details>", "</details>"} {
+		if !strings.Contains(md, want) {
+			t.Fatalf("markdown output missing %q:\n%s", want, md)
+		}
+	}
+}
+
+func TestUploadFile(t *testing.T) {
+	tmp, err := os.CreateTemp("", "upload-test-*.txt")
+	if err != nil {
+		t.Fatalf("create temp file: %v", err)
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.WriteString("sample attachment content"); err != nil {
+		t.Fatalf("write temp file: %v", err)
+	}
+	tmp.Close()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/chat/create_pow_challenge":
+			var req map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Errorf("decode pow req: %v", err)
+			}
+			if req["target_path"] != "/api/v0/file/upload_file" {
+				t.Errorf("target_path = %q, want /api/v0/file/upload_file", req["target_path"])
+			}
+			fmt.Fprint(w, `{"code":0,"msg":"","data":{"biz_code":0,"biz_data":{"algorithm":"DeepSeekHashV1","challenge":"168efa309e5a73033fc82dde4333bbc6515da440ef961574f73f99cbe7b397ad","salt":"a40318e6b7af56bf27cf","expire_at":1790959021012,"difficulty":144000,"signature":"captured","target_path":"/api/v0/file/upload_file"}}}`)
+		case "/file/upload_file":
+			if r.Method != http.MethodPost {
+				t.Errorf("upload method = %s, want POST", r.Method)
+			}
+			if r.Header.Get("x-ds-pow-response") == "" {
+				t.Error("missing x-ds-pow-response header")
+			}
+			file, header, err := r.FormFile("file")
+			if err != nil {
+				t.Fatalf("form file: %v", err)
+			}
+			defer file.Close()
+			if header.Filename != filepath.Base(tmp.Name()) {
+				t.Errorf("filename = %q, want %q", header.Filename, filepath.Base(tmp.Name()))
+			}
+			content, _ := io.ReadAll(file)
+			if string(content) != "sample attachment content" {
+				t.Errorf("content = %q, want sample attachment content", string(content))
+			}
+			fmt.Fprint(w, `{"code":0,"msg":"","data":{"biz_code":0,"biz_data":{"id":"file-998877"}}}`)
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewAPIClient("test-token")
+	client.baseURL = server.URL
+
+	fileID, err := client.UploadFile(context.Background(), tmp.Name())
+	if err != nil {
+		t.Fatalf("UploadFile: %v", err)
+	}
+	if fileID != "file-998877" {
+		t.Fatalf("fileID = %q, want file-998877", fileID)
+	}
+
+	// Verify error on non-existent file
+	if _, err := client.UploadFile(context.Background(), "/non/existent/path.txt"); err == nil {
+		t.Fatal("expected error on non-existent file, got nil")
+	}
+
+	// Verify error on directory
+	if _, err := client.UploadFile(context.Background(), os.TempDir()); err == nil {
+		t.Fatal("expected error on directory, got nil")
 	}
 }

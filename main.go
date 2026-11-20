@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -89,6 +91,7 @@ const (
 	evPowProgress
 	evDone
 	evError
+	evCanceled
 )
 
 type streamEvent struct {
@@ -118,6 +121,12 @@ type historyMsg struct {
 type deleteSessionMsg struct {
 	sessionID string
 	seq       int
+	err       error
+}
+
+type exportSessionMsg struct {
+	sessionID string
+	path      string
 	err       error
 }
 
@@ -156,10 +165,13 @@ type model struct {
 	historySeq       int
 	deleteSeq        int
 
-	streaming   bool
-	status      string
-	statusLevel int
-	powPercent  int64
+	streaming       bool
+	cancelStream    context.CancelFunc
+	thinkingEnabled bool
+	searchEnabled   bool
+	status          string
+	statusLevel     int
+	powPercent      int64
 
 	width, height int
 	ready         bool
@@ -184,16 +196,18 @@ func newModel(token string) *model {
 	spin.Style = lipgloss.NewStyle().Foreground(accentColor)
 
 	m := &model{
-		token:       token,
-		configPath:  tokenPath(),
-		events:      make(chan streamEvent, 1024),
-		viewport:    viewport.New(0, 0),
-		input:       input,
-		authInput:   authInput,
-		spinner:     spin,
-		status:      "ready",
-		statusLevel: statusIdle,
-		authMode:    token == "",
+		token:           token,
+		configPath:      tokenPath(),
+		events:          make(chan streamEvent, 1024),
+		viewport:        viewport.New(0, 0),
+		input:           input,
+		authInput:       authInput,
+		spinner:         spin,
+		status:          "ready",
+		statusLevel:     statusIdle,
+		authMode:        token == "",
+		thinkingEnabled: true,
+		searchEnabled:   true,
 	}
 	if token != "" {
 		m.client = NewAPIClient(token)
@@ -239,6 +253,27 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
+		case "esc":
+			if m.streaming && m.cancelStream != nil {
+				m.cancelStream()
+				m.cancelStream = nil
+				m.status = "canceling…"
+				m.statusLevel = statusWorking
+				return m, nil
+			}
+			return m, nil
+		case "ctrl+d":
+			if !m.streaming {
+				m.thinkingEnabled = !m.thinkingEnabled
+				return m, nil
+			}
+			return m, nil
+		case "ctrl+s":
+			if !m.streaming {
+				m.searchEnabled = !m.searchEnabled
+				return m, nil
+			}
+			return m, nil
 		case "ctrl+r":
 			if m.streaming {
 				return m, nil
@@ -263,9 +298,24 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if prompt == "" {
 				return m, nil
 			}
+
+			var refFilePath string
+			displayPrompt := prompt
+
+			if filePath, userPrompt, ok := parseFileAndPrompt(prompt); ok {
+				if _, err := os.Stat(filePath); err != nil {
+					m.status = fmt.Sprintf("file error: %v", err)
+					m.statusLevel = statusError
+					return m, nil
+				}
+				refFilePath = filePath
+				prompt = userPrompt
+				displayPrompt = fmt.Sprintf("[attached: %s] %s", filepath.Base(refFilePath), prompt)
+			}
+
 			m.input.SetValue("")
 			m.messages = append(m.messages,
-				chatMessage{kind: msgUser, text: prompt},
+				chatMessage{kind: msgUser, text: displayPrompt},
 				chatMessage{kind: msgAssistant},
 			)
 			m.streaming = true
@@ -278,8 +328,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				SessionID:       m.sessionID,
 				ParentMessageID: m.parentID,
 				Prompt:          prompt,
+				RefFilePath:     refFilePath,
 				FirstTurn:       m.parentID == nil,
-				ThinkingEnabled: true,
+				ThinkingEnabled: m.thinkingEnabled,
+				SearchEnabled:   m.searchEnabled,
 			}
 			return m, tea.Batch(m.runCompletion(req), m.spinner.Tick, waitForEvent(m.events))
 		case "pgup", "pgdown", "up", "down", "home", "end":
@@ -289,6 +341,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
+		if !m.streaming && !m.recentOpen && !m.authMode {
+			val := m.input.Value()
+			if !strings.HasPrefix(val, "/file ") && !strings.HasPrefix(val, "/upload ") {
+				if cleanPath, ok := cleanFilePath(val); ok {
+					m.input.SetValue("/file " + cleanPath + " ")
+					m.input.CursorEnd()
+					m.status = fmt.Sprintf("attached: %s", filepath.Base(cleanPath))
+					m.statusLevel = statusIdle
+				}
+			}
+		}
 		return m, cmd
 
 	case spinner.TickMsg:
@@ -309,6 +372,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case deleteSessionMsg:
 		m.handleDelete(msg)
+		return m, nil
+
+	case exportSessionMsg:
+		if msg.err != nil {
+			m.sessionsError = "export failed: " + friendlyError(msg.err)
+		} else {
+			m.recentNotice = "exported " + filepath.Base(msg.path)
+		}
 		return m, nil
 
 	case streamEvent:
@@ -341,7 +412,11 @@ func (m *model) View() string {
 
 	header := m.headerView(m.status, m.streaming)
 	inputLine := lipgloss.NewStyle().Foreground(accentColor).Render("› ") + m.input.View()
-	help := helpStyle.Render("enter send · ctrl+r chats · ctrl+n new chat · ctrl+t token · ctrl+c quit")
+	helpText := "enter send · ctrl+d think · ctrl+s search · ctrl+r chats · ctrl+n new chat · ctrl+t token · ctrl+c quit"
+	if m.streaming {
+		helpText = "esc stop · ctrl+c quit"
+	}
+	help := helpStyle.Render(helpText)
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, m.viewport.View(), inputLine, help)
 }
@@ -352,6 +427,19 @@ func (m *model) headerView(status string, showSpinner bool) string {
 		titleWidth := max(6, min(40, m.width/2))
 		left += helpStyle.Render(" · " + truncateText(m.chatTitle, titleWidth))
 	}
+	var modes []string
+	if m.thinkingEnabled {
+		modes = append(modes, readyStyle.Render("[think]"))
+	} else {
+		modes = append(modes, helpStyle.Render("[think:off]"))
+	}
+	if m.searchEnabled {
+		modes = append(modes, readyStyle.Render("[search]"))
+	} else {
+		modes = append(modes, helpStyle.Render("[search:off]"))
+	}
+	left += " " + strings.Join(modes, " ")
+
 	if showSpinner {
 		status = m.spinner.View() + " " + status
 	}
@@ -403,7 +491,7 @@ func (m *model) recentView() string {
 	header := m.headerView(m.status, m.sessionsLoading || m.historyLoading || m.deleting)
 	bodyHeight := max(5, m.viewport.Height+1)
 	body := lipgloss.Place(m.width, bodyHeight, lipgloss.Center, lipgloss.Center, m.recentPanel())
-	help := helpStyle.Render("↑/↓ select · enter open · n new chat · d delete · r refresh · esc close")
+	help := helpStyle.Render("↑/↓ select · enter open · e export · n new chat · d delete · r refresh · esc close")
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, help)
 }
 
@@ -591,6 +679,10 @@ func (m *model) statusStyle() lipgloss.Style {
 }
 
 func (m *model) newChat() {
+	if m.cancelStream != nil {
+		m.cancelStream()
+		m.cancelStream = nil
+	}
 	m.closeRecent()
 	m.messages = nil
 	m.sessionID = ""
@@ -782,6 +874,12 @@ func (m *model) updateRecent(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.historySeq++
 		seq := m.historySeq
 		return m, tea.Batch(m.loadHistory(selected.ID, seq), m.spinner.Tick)
+	case "e":
+		if len(m.sessions) > 0 {
+			selected := m.sessions[m.sessionIndex]
+			m.recentNotice = "exporting…"
+			return m, m.exportSessionCmd(selected.ID)
+		}
 	case "d":
 		if len(m.sessions) > 0 {
 			m.deleteConfirm = true
@@ -790,6 +888,49 @@ func (m *model) updateRecent(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func (m *model) exportSessionCmd(sessionID string) tea.Cmd {
+	client := m.client
+	if client == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		history, err := client.FetchHistory(ctx, sessionID)
+		if err != nil {
+			return exportSessionMsg{sessionID: sessionID, err: err}
+		}
+		md := history.ToMarkdown()
+		name := sanitizeFilename(history.Title)
+		if name == "" {
+			name = "chat_" + sessionID
+		}
+		filename := name + ".md"
+		if err := os.WriteFile(filename, []byte(md), 0o644); err != nil {
+			return exportSessionMsg{sessionID: sessionID, err: err}
+		}
+		return exportSessionMsg{sessionID: sessionID, path: filename}
+	}
+}
+
+func sanitizeFilename(name string) string {
+	name = strings.TrimSpace(strings.ToLower(name))
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		case r == ' ', r == '\t':
+			b.WriteByte('-')
+		}
+	}
+	res := strings.Trim(b.String(), "-_")
+	if len(res) > 50 {
+		res = res[:50]
+	}
+	return res
 }
 
 func (m *model) loadSessions(replace bool, seq int) tea.Cmd {
@@ -1155,6 +1296,7 @@ func (m *model) handleStreamEvent(event streamEvent) {
 
 	case evDone:
 		m.streaming = false
+		m.cancelStream = nil
 		m.status = "ready"
 		m.statusLevel = statusIdle
 		if last := m.lastAssistant(); last != nil && last.text == "" && last.thinking == "" {
@@ -1162,8 +1304,19 @@ func (m *model) handleStreamEvent(event streamEvent) {
 		}
 		m.renderChat(true)
 
+	case evCanceled:
+		m.streaming = false
+		m.cancelStream = nil
+		m.status = "canceled"
+		m.statusLevel = statusIdle
+		if last := m.lastAssistant(); last != nil && last.text == "" && last.thinking == "" && len(m.messages) > 0 {
+			m.messages = m.messages[:len(m.messages)-1]
+		}
+		m.renderChat(true)
+
 	case evError:
 		m.streaming = false
+		m.cancelStream = nil
 		m.status = "error"
 		m.statusLevel = statusError
 		if last := m.lastAssistant(); last != nil && last.text == "" && last.thinking == "" && len(m.messages) > 0 {
@@ -1208,7 +1361,7 @@ func (m *model) renderChat(scrollToBottom bool) {
 	if len(m.messages) == 0 {
 		b.WriteString(helpStyle.Render("DeepSeek chat in your terminal."))
 		b.WriteString("\n")
-		b.WriteString(helpStyle.Render("Type a message and press enter."))
+		b.WriteString(helpStyle.Render("Type a message or /file <path> <prompt> and press enter."))
 	}
 
 	for i := range m.messages {
@@ -1261,19 +1414,38 @@ func (m *model) runCompletion(req CompletionRequest) tea.Cmd {
 			return streamEvent{kind: evError, text: "no DeepSeek token configured"}
 		}
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancelStream = cancel
 	return func() tea.Msg {
 		go func() {
-			ctx := context.Background()
-
+			defer cancel()
 			if req.SessionID == "" {
 				events <- streamEvent{kind: evStatus, text: "creating chat session…"}
 				sessionID, err := client.CreateSession(ctx)
 				if err != nil {
+					if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+						events <- streamEvent{kind: evCanceled}
+						return
+					}
 					events <- streamEvent{kind: evError, text: friendlyError(err)}
 					return
 				}
 				req.SessionID = sessionID
 				events <- streamEvent{kind: evSession, text: sessionID}
+			}
+
+			if req.RefFilePath != "" && len(req.RefFileIDs) == 0 {
+				events <- streamEvent{kind: evStatus, text: "uploading " + filepath.Base(req.RefFilePath) + "…"}
+				fileID, err := client.UploadFile(ctx, req.RefFilePath)
+				if err != nil {
+					if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+						events <- streamEvent{kind: evCanceled}
+						return
+					}
+					events <- streamEvent{kind: evError, text: friendlyError(err)}
+					return
+				}
+				req.RefFileIDs = []string{fileID}
 			}
 
 			err := client.Complete(ctx, req, CompletionHooks{
@@ -1295,6 +1467,10 @@ func (m *model) runCompletion(req CompletionRequest) tea.Cmd {
 				},
 			})
 			if err != nil {
+				if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+					events <- streamEvent{kind: evCanceled}
+					return
+				}
 				events <- streamEvent{kind: evError, text: friendlyError(err)}
 				return
 			}
@@ -1427,14 +1603,146 @@ type codeFilter struct {
 	lang  string
 }
 
+// isExplicitPath returns true if the string has characteristics of an explicit
+// file path: absolute path, file URI, home directory path, relative path with
+// slash, Windows drive path, or quoted path.
+func isExplicitPath(s string) bool {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "file://") || strings.HasPrefix(s, "~/") || strings.HasPrefix(s, "./") || strings.HasPrefix(s, "../") {
+		return true
+	}
+	if strings.HasPrefix(s, "/") || strings.HasPrefix(s, "\\") {
+		return true
+	}
+	if len(s) >= 3 && ((s[0] >= 'a' && s[0] <= 'z') || (s[0] >= 'A' && s[0] <= 'Z')) && s[1] == ':' && (s[2] == '/' || s[2] == '\\') {
+		return true
+	}
+	if (strings.HasPrefix(s, "'") && strings.HasSuffix(s, "'")) || (strings.HasPrefix(s, "\"") && strings.HasSuffix(s, "\"")) {
+		return true
+	}
+	return false
+}
+
+// cleanFilePath attempts to resolve a raw dropped or typed string into a verified existing file path.
+func cleanFilePath(raw string) (string, bool) {
+	p := strings.TrimSpace(raw)
+	p = strings.Trim(p, "\x00\r\n\t")
+	if p == "" {
+		return "", false
+	}
+	if !isExplicitPath(p) {
+		return "", false
+	}
+	if (strings.HasPrefix(p, "'") && strings.HasSuffix(p, "'") && len(p) >= 2) ||
+		(strings.HasPrefix(p, "\"") && strings.HasSuffix(p, "\"") && len(p) >= 2) {
+		p = p[1 : len(p)-1]
+	}
+	if strings.HasPrefix(p, "file://") {
+		p = strings.TrimPrefix(p, "file://")
+		if len(p) >= 3 && p[0] == '/' && p[2] == ':' {
+			p = p[1:]
+		}
+		if unescaped, err := url.PathUnescape(p); err == nil {
+			p = unescaped
+		}
+	}
+	p = strings.ReplaceAll(p, `\ `, " ")
+	if strings.HasPrefix(p, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			p = filepath.Join(home, p[2:])
+		}
+	}
+	stat, err := os.Stat(p)
+	if err == nil && !stat.IsDir() {
+		return p, true
+	}
+	return "", false
+}
+
+func splitFirstToken(s string) (token, rest string) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", ""
+	}
+	if s[0] == '\'' || s[0] == '"' {
+		quote := s[0]
+		end := strings.IndexByte(s[1:], quote)
+		if end != -1 {
+			token = s[:end+2]
+			rest = strings.TrimSpace(s[end+2:])
+			return token, rest
+		}
+	}
+	var b strings.Builder
+	runes := []rune(s)
+	i := 0
+	for i < len(runes) {
+		if runes[i] == '\\' && i+1 < len(runes) && runes[i+1] == ' ' {
+			b.WriteRune('\\')
+			b.WriteRune(' ')
+			i += 2
+			continue
+		}
+		if runes[i] == ' ' || runes[i] == '\t' {
+			break
+		}
+		b.WriteRune(runes[i])
+		i++
+	}
+	token = b.String()
+	if i < len(runes) {
+		rest = strings.TrimSpace(string(runes[i:]))
+	}
+	return token, rest
+}
+
+func parseFileAndPrompt(input string) (string, string, bool) {
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "" {
+		return "", "", false
+	}
+	for _, prefix := range []string{"/file ", "/upload "} {
+		if strings.HasPrefix(trimmed, prefix) {
+			rest := strings.TrimSpace(strings.TrimPrefix(trimmed, prefix))
+			filePath, userPrompt := splitFirstToken(rest)
+			if clean, ok := cleanFilePath(filePath); ok {
+				filePath = clean
+			} else {
+				filePath = strings.Trim(filePath, "'\"")
+			}
+			if userPrompt == "" {
+				userPrompt = "Analyze the attached file."
+			}
+			return filePath, userPrompt, true
+		}
+	}
+	if clean, ok := cleanFilePath(trimmed); ok {
+		return clean, "Analyze the attached file.", true
+	}
+	firstToken, userPrompt := splitFirstToken(trimmed)
+	if isExplicitPath(firstToken) {
+		if clean, ok := cleanFilePath(firstToken); ok {
+			if userPrompt == "" {
+				userPrompt = "Analyze the attached file."
+			}
+			return clean, userPrompt, true
+		}
+	}
+	return "", trimmed, false
+}
+
 type stealthOptions struct {
 	prompt   string
 	token    string
 	codeOnly bool
 	first    bool
 	lang     string
+	filePath string
 	noHint   bool
 	help     bool
+	think    bool
+	noSearch bool
+	exportID string
 }
 
 // parseStealthArgs accepts flags anywhere in the argument list and joins every
@@ -1457,6 +1765,52 @@ func parseStealthArgs(args []string) (stealthOptions, error) {
 		case arg == "-1", arg == "--first":
 			opts.codeOnly = true
 			opts.first = true
+		case arg == "-f", arg == "--file", arg == "-file":
+			if i+1 >= len(args) {
+				return opts, errors.New("--file requires a file path")
+			}
+			i++
+			opts.filePath = strings.TrimSpace(args[i])
+			if opts.filePath == "" {
+				return opts, errors.New("--file requires a file path")
+			}
+		case strings.HasPrefix(arg, "--file="):
+			opts.filePath = strings.TrimSpace(strings.TrimPrefix(arg, "--file="))
+			if opts.filePath == "" {
+				return opts, errors.New("--file requires a file path")
+			}
+		case strings.HasPrefix(arg, "-file="):
+			opts.filePath = strings.TrimSpace(strings.TrimPrefix(arg, "-file="))
+			if opts.filePath == "" {
+				return opts, errors.New("--file requires a file path")
+			}
+		case arg == "-e", arg == "--export":
+			if i+1 >= len(args) {
+				return opts, errors.New("--export requires a session ID")
+			}
+			i++
+			opts.exportID = strings.TrimSpace(args[i])
+			if opts.exportID == "" {
+				return opts, errors.New("--export requires a session ID")
+			}
+		case strings.HasPrefix(arg, "--export="):
+			opts.exportID = strings.TrimSpace(strings.TrimPrefix(arg, "--export="))
+			if opts.exportID == "" {
+				return opts, errors.New("--export requires a session ID")
+			}
+		case strings.HasPrefix(arg, "-export="):
+			opts.exportID = strings.TrimSpace(strings.TrimPrefix(arg, "-export="))
+			if opts.exportID == "" {
+				return opts, errors.New("--export requires a session ID")
+			}
+		case arg == "--think", arg == "--thinking":
+			opts.think = true
+		case arg == "--no-think", arg == "--no-thinking":
+			opts.think = false
+		case arg == "--no-search":
+			opts.noSearch = true
+		case arg == "--search":
+			opts.noSearch = false
 		case arg == "-l", arg == "--lang":
 			if i+1 >= len(args) {
 				return opts, errors.New("--lang requires a value")
@@ -1611,12 +1965,20 @@ func printOnlyCodeTo(w io.Writer, text string, filter codeFilter) error {
 	return nil
 }
 
-// runStealthQuery executes one request in a fresh session. Thinking is disabled
-// so stdout contains only the assistant's visible answer.
-func runStealthQuery(ctx context.Context, client *APIClient, prompt string, codeOnly bool, filter codeFilter, out io.Writer) error {
+// runStealthQuery executes one request in a fresh session.
+func runStealthQuery(ctx context.Context, client *APIClient, prompt, filePath string, codeOnly bool, filter codeFilter, thinking, search bool, out io.Writer) error {
 	sessionID, err := client.CreateSession(ctx)
 	if err != nil {
 		return fmt.Errorf("create session: %w", err)
+	}
+
+	var refIDs []string
+	if filePath != "" {
+		fileID, err := client.UploadFile(ctx, filePath)
+		if err != nil {
+			return fmt.Errorf("upload file: %w", err)
+		}
+		refIDs = append(refIDs, fileID)
 	}
 
 	var reply strings.Builder
@@ -1627,8 +1989,10 @@ func runStealthQuery(ctx context.Context, client *APIClient, prompt string, code
 	err = client.Complete(ctx, CompletionRequest{
 		SessionID:       sessionID,
 		Prompt:          prompt,
+		RefFileIDs:      refIDs,
 		FirstTurn:       true,
-		ThinkingEnabled: false,
+		ThinkingEnabled: thinking,
+		SearchEnabled:   search,
 	}, CompletionHooks{
 		OnEvent: func(event StreamEvent) {
 			if event.Kind != StreamReply || event.Text == "" || writeErr != nil {
@@ -1672,18 +2036,54 @@ func runStealthMode(args []string) int {
 		stealthUsage(os.Stdout)
 		return 0
 	}
-	if opts.prompt == "" {
-		return 0
-	}
 
 	token := normalizeToken(opts.token)
 	if token == "" {
 		token = storedToken()
 	}
+
+	if opts.exportID != "" {
+		if token == "" {
+			fmt.Fprintln(os.Stderr, "deepseek-tui: no DeepSeek token found.")
+			fmt.Fprintln(os.Stderr, "Set DEEPSEEK_TOKEN, write "+tokenPath()+", or pass --token.")
+			return 1
+		}
+		client := NewAPIClient(token)
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+		defer stop()
+		history, err := client.FetchHistory(ctx, opts.exportID)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "deepseek-tui export:", friendlyError(err))
+			return 1
+		}
+		fmt.Print(history.ToMarkdown())
+		return 0
+	}
+
+	if opts.filePath == "" && opts.prompt != "" {
+		if filePath, userPrompt, ok := parseFileAndPrompt(opts.prompt); ok {
+			opts.filePath = filePath
+			opts.prompt = userPrompt
+		}
+	}
+
+	if opts.prompt == "" && opts.filePath == "" {
+		return 0
+	}
+	if opts.prompt == "" && opts.filePath != "" {
+		opts.prompt = "Analyze the attached file."
+	}
 	if token == "" {
 		fmt.Fprintln(os.Stderr, "deepseek-tui: no DeepSeek token found.")
 		fmt.Fprintln(os.Stderr, "Set DEEPSEEK_TOKEN, write "+tokenPath()+", or pass --token.")
 		return 1
+	}
+
+	if opts.filePath != "" {
+		if _, err := os.Stat(opts.filePath); err != nil {
+			fmt.Fprintf(os.Stderr, "deepseek-tui: file %q: %v\n", opts.filePath, err)
+			return 1
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -1692,7 +2092,7 @@ func runStealthMode(args []string) int {
 	client := NewAPIClient(token)
 	filter := codeFilter{first: opts.first, lang: opts.lang}
 	prompt := buildRequestPrompt(opts.prompt, opts)
-	if err := runStealthQuery(ctx, client, prompt, opts.codeOnly, filter, os.Stdout); err != nil {
+	if err := runStealthQuery(ctx, client, prompt, opts.filePath, opts.codeOnly, filter, opts.think, !opts.noSearch, os.Stdout); err != nil {
 		if errors.Is(err, context.Canceled) {
 			return 130
 		}
@@ -1716,15 +2116,34 @@ flags:
   -c, --code         print only fenced Markdown code blocks
   -1, --first        print only the first selected block (implies --code)
   -l, --lang LANG    only blocks in LANG, comma-separated (implies --code)
+  -f, --file PATH    attach a local document or file to the query
+  -e, --export ID    export full session history as Markdown to stdout
       --no-hint      send the prompt without the automatic code-only instruction
+      --think        enable thinking / reasoning mode (DeepThink)
+      --no-think     disable thinking / reasoning mode (default in CLI)
+      --search       enable web search retrieval (default)
+      --no-search    disable web search retrieval
       --token TOKEN  DeepSeek web userToken (overrides env and config file)
   -h, --help         show this help
       --version      print version and exit
 
+Interactive TUI hotkeys:
+  ctrl+d             toggle DeepThink reasoning mode on / off
+  ctrl+s             toggle Web Search retrieval on / off
+  esc                cancel active streaming response
+  ctrl+r             open recent chats drawer (e export, d+y delete, r refresh)
+  ctrl+n             start a new conversation session
+  ctrl+t             change or reveal stored userToken
+  ctrl+c             quit
+
+File attachment in TUI:
+  Drag and drop any file directly into the terminal window to attach it!
+  Or type /file <path> <optional prompt> in the input box.
+
 Code mode appends an instruction asking for one fenced code block. If no block
 is found, stdout stays empty and the exit code is 3.
 
-Token lookup: --token, DEEPSEEK_TOKEN, then the saved token file.
+Token lookup: --token, DEEPSEEK_TOKEN, then ~/.config/deepseek.token.
 Put -- before a prompt that starts with a dash. An empty prompt exits 0.`)
 }
 

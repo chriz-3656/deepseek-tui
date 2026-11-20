@@ -4,6 +4,32 @@ All notable changes to this project are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-11-20
+
+### Added
+
+- Document & File Attachments: support for uploading and attaching local documents
+  via `/api/v0/file/upload_file` with native `DeepSeekHashV1` proof-of-work negotiation.
+- Terminal Drag-and-Drop: dragging and dropping any file from your desktop or file
+  manager into the TUI automatically parses the file path, strips quotes/URI schemes,
+  unescapes special characters, and sets it up as an attachment.
+- CLI File Attachment: added `-f` / `--file PATH` flag in CLI mode, as well as automatic
+  path detection for dropped files in the CLI prompt argument.
+- TUI Mode Toggles: hotkeys `ctrl+d` (toggle DeepThink reasoning mode on/off) and
+  `ctrl+s` (toggle web search retrieval on/off) with live header badges `[think]` / `[search]`.
+- CLI Mode Toggles: added `--think`, `--no-think`, `--search`, and `--no-search` flags.
+- Mid-Stream Cancellation: press `esc` in the TUI during active streaming to abort in-flight
+  generation immediately without losing prior chat turns or exiting the application.
+- Conversation History Export: export entire chat sessions with collapsible thinking
+  process blocks to clean Markdown via `e` in the recent chats drawer or `-e` / `--export ID` in CLI mode.
+- Comprehensive `--help` output with full CLI flags, TUI hotkeys, and attachment instructions.
+
+### Changed
+
+- Enhanced error envelope parsing to properly unwrap server business errors (`biz_code` / `biz_msg`)
+  when payloads return null business data.
+- Improved empty conversation view with discovery hint for file attachments.
+
 ## [0.5.1] - 2026-11-17
 
 ### Added

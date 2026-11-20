@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -80,6 +81,41 @@ func TestParseStealthArgs(t *testing.T) {
 			name: "token with equals",
 			args: []string{"--token=tok", "hi"},
 			want: stealthOptions{prompt: "hi", token: "tok"},
+		},
+		{
+			name: "think flag",
+			args: []string{"--think", "hi"},
+			want: stealthOptions{prompt: "hi", think: true},
+		},
+		{
+			name: "no-think flag",
+			args: []string{"--no-think", "hi"},
+			want: stealthOptions{prompt: "hi", think: false},
+		},
+		{
+			name: "search flag",
+			args: []string{"--search", "hi"},
+			want: stealthOptions{prompt: "hi", noSearch: false},
+		},
+		{
+			name: "no-search flag",
+			args: []string{"--no-search", "hi"},
+			want: stealthOptions{prompt: "hi", noSearch: true},
+		},
+		{
+			name: "file flag",
+			args: []string{"-f", "doc.txt", "summarize"},
+			want: stealthOptions{prompt: "summarize", filePath: "doc.txt"},
+		},
+		{
+			name: "file flag equals",
+			args: []string{"--file=doc.txt", "summarize"},
+			want: stealthOptions{prompt: "summarize", filePath: "doc.txt"},
+		},
+		{
+			name: "export flag",
+			args: []string{"--export", "session-123"},
+			want: stealthOptions{exportID: "session-123"},
 		},
 		{
 			name: "dash prompt after terminator",
@@ -261,7 +297,7 @@ func TestRunStealthQueryUsesThinkingOffAndPrintsOnlyCode(t *testing.T) {
 	client.baseURL = server.URL
 
 	var out bytes.Buffer
-	if err := runStealthQuery(context.Background(), client, "write code", true, codeFilter{}, &out); err != nil {
+	if err := runStealthQuery(context.Background(), client, "write code", "", true, codeFilter{}, false, true, &out); err != nil {
 		t.Fatalf("runStealthQuery: %v", err)
 	}
 	if got, want := out.String(), "fmt.Println(1)\n"; got != want {
@@ -273,11 +309,74 @@ func TestRunStealthQueryUsesThinkingOffAndPrintsOnlyCode(t *testing.T) {
 		if payload["thinking_enabled"] != false {
 			t.Fatalf("thinking_enabled = %v, want false", payload["thinking_enabled"])
 		}
+		if payload["search_enabled"] != true {
+			t.Fatalf("search_enabled = %v, want true", payload["search_enabled"])
+		}
 		if payload["prompt"] != "write code" {
 			t.Fatalf("prompt = %v, want %q", payload["prompt"], "write code")
 		}
 		if payload["model_type"] != "default" {
 			t.Fatalf("model_type = %v, want default", payload["model_type"])
+		}
+	default:
+		t.Fatal("completion payload was not captured")
+	}
+}
+
+func TestRunStealthQueryWithFileUpload(t *testing.T) {
+	tmp, err := os.CreateTemp("", "stealth-file-*.txt")
+	if err != nil {
+		t.Fatalf("create temp file: %v", err)
+	}
+	defer os.Remove(tmp.Name())
+	tmp.WriteString("file data for query")
+	tmp.Close()
+
+	payloadCh := make(chan map[string]any, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/chat_session/create":
+			fmt.Fprint(w, `{"code":0,"msg":"","data":{"biz_code":0,"biz_data":{"id":"session-f1"}}}`)
+		case "/chat/create_pow_challenge":
+			var req map[string]string
+			json.NewDecoder(r.Body).Decode(&req)
+			target := req["target_path"]
+			fmt.Fprintf(w, `{"code":0,"msg":"","data":{"biz_code":0,"biz_data":{"algorithm":"DeepSeekHashV1","challenge":"168efa309e5a73033fc82dde4333bbc6515da440ef961574f73f99cbe7b397ad","salt":"a40318e6b7af56bf27cf","expire_at":1790959021012,"difficulty":144000,"signature":"sig","target_path":%q}}}`, target)
+		case "/file/upload_file":
+			fmt.Fprint(w, `{"code":0,"msg":"","data":{"biz_code":0,"biz_data":{"id":"file-id-abc"}}}`)
+		case "/chat/completion":
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Errorf("decode completion payload: %v", err)
+			}
+			payloadCh <- payload
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: {\"p\":\"response/content\",\"o\":\"APPEND\",\"v\":\"analyzed file\"}\n\n")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewAPIClient("test-token")
+	client.baseURL = server.URL
+
+	var out bytes.Buffer
+	if err := runStealthQuery(context.Background(), client, "summarize", tmp.Name(), false, codeFilter{}, true, true, &out); err != nil {
+		t.Fatalf("runStealthQuery with file: %v", err)
+	}
+	if got := out.String(); !strings.Contains(got, "analyzed file") {
+		t.Fatalf("output = %q, want analyzed file", got)
+	}
+
+	select {
+	case payload := <-payloadCh:
+		refIDs, ok := payload["ref_file_ids"].([]any)
+		if !ok || len(refIDs) != 1 || refIDs[0] != "file-id-abc" {
+			t.Fatalf("ref_file_ids = %v, want ['file-id-abc']", payload["ref_file_ids"])
+		}
+		if payload["thinking_enabled"] != true {
+			t.Fatalf("thinking_enabled = %v, want true", payload["thinking_enabled"])
 		}
 	default:
 		t.Fatal("completion payload was not captured")
