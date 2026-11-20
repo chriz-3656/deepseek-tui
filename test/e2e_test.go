@@ -1,4 +1,4 @@
-package test
+package main
 
 import (
 	"bytes"
@@ -10,37 +10,43 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
-var testBinary string
+var (
+	testBinary string
+	buildOnce  sync.Once
+	buildErr   error
+)
 
-func TestMain(m *testing.M) {
-	root, err := findRepoRoot()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to find repo root: %v\n", err)
-		os.Exit(1)
+func getTestBinary(t *testing.T) string {
+	t.Helper()
+	buildOnce.Do(func() {
+		root, err := findRepoRoot()
+		if err != nil {
+			buildErr = err
+			return
+		}
+		tmpDir, err := os.MkdirTemp("", "deepseek-tui-test-*")
+		if err != nil {
+			buildErr = err
+			return
+		}
+		bin := filepath.Join(tmpDir, "deepseek-tui")
+		buildCmd := exec.Command("go", "build", "-trimpath", "-ldflags=-X main.version=v0.6.0-test", "-o", bin, ".")
+		buildCmd.Dir = root
+		if out, err := buildCmd.CombinedOutput(); err != nil {
+			buildErr = fmt.Errorf("compile test binary: %w\n%s", err, out)
+			return
+		}
+		testBinary = bin
+	})
+	if buildErr != nil {
+		t.Fatalf("failed to build test binary: %v", buildErr)
 	}
-
-	tmpDir, err := os.MkdirTemp("", "deepseek-tui-test-*")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to create temp dir: %v\n", err)
-		os.Exit(1)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	bin := filepath.Join(tmpDir, "deepseek-tui")
-	buildCmd := exec.Command("go", "build", "-trimpath", "-ldflags=-X main.version=v0.6.0-test", "-o", bin, ".")
-	buildCmd.Dir = root
-	if out, err := buildCmd.CombinedOutput(); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to compile test binary: %v\n%s\n", err, out)
-		os.Exit(1)
-	}
-	testBinary = bin
-
-	code := m.Run()
-	os.Exit(code)
+	return testBinary
 }
 
 func findRepoRoot() (string, error) {
@@ -63,10 +69,12 @@ func findRepoRoot() (string, error) {
 func runCLI(t *testing.T, env []string, args ...string) (stdout, stderr string, exitCode int) {
 	t.Helper()
 
+	bin := getTestBinary(t)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, testBinary, args...)
+	cmd := exec.CommandContext(ctx, bin, args...)
 	if env != nil {
 		cmd.Env = append(os.Environ(), env...)
 	}
