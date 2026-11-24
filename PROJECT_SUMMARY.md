@@ -10,7 +10,8 @@ The application provides:
 
 - **Interactive Terminal UI**: Built with Bubble Tea and Lip Gloss, featuring live streaming replies, responsive layouts, and adaptive color themes;
 - **Native Proof-of-Work Engine**: Pure-Go implementation of `DeepSeekHashV1` (a custom 23-round Keccak-f[1600] permutation) solving challenges for both chat completions and file uploads in milliseconds;
-- **Document & File Attachments**: Local file upload pipeline (`/api/v0/file/upload_file`) with native PoW challenge solving, terminal drag-and-drop path auto-detection, `:file <path>` TUI command, and `-f, --file` CLI flag;
+- **Document & File Attachments**: Local file upload pipeline (`/api/v0/file/upload_file`) with native PoW challenge solving, terminal drag-and-drop path auto-detection, `/file <path>` TUI command, and `-f, --file` CLI flag;
+- **Local Agent API Server (`--serve`)**: Pure-stdlib HTTP server exposing OpenAI Chat Completions (`/v1/chat/completions`), OpenAI Responses (`/v1/responses`), and Anthropic Messages (`/v1/messages`) with streaming/non-streaming tool calling (`<tool_call>` JSON + DeepSeek DSML) and prefix-matched session reuse;
 - **Runtime Mode Toggles**: Live switches for DeepThink reasoning (`ctrl+d`, `--think` / `--no-think`) and Web Search retrieval (`ctrl+s`, `--search` / `--no-search`) with status badges in the header;
 - **Mid-Stream Cancellation**: Immediate stream abortion via `esc` in the TUI without dropping prior chat turns;
 - **Markdown Session Export**: Exporting full multi-turn conversation histories with collapsible `<details>` thinking blocks to standard GitHub Flavored Markdown (`e` in recent chats drawer, `-e, --export` in CLI);
@@ -42,7 +43,7 @@ Repository: `https://github.com/chriz-3656/deepseek-tui`
   - `ctrl+n`: resets active conversation and starts a fresh session.
   - `ctrl+t`: opens token entry panel with `ctrl+r` token reveal/hide toggle.
 - **Drag-and-Drop Auto-Formatting**:
-  - Dragging and dropping a file from desktop or terminal file managers formats the input line into `:file <path> <optional prompt>`.
+  - Dragging and dropping a file from desktop or terminal file managers formats the input line into `/file <path> <optional prompt>`.
   - Automatically handles double quotes, single quotes, backslash-escapes, raw spaces, and `file://` URI schemes.
 - **Recent Chats Drawer**:
   - Slide-over overlay with session counts, pagination (`l`), deletion (`d` then `y`), and switching (`enter`).
@@ -89,8 +90,8 @@ Implemented across `main.go` and `test/stealth_test.go`:
 - **Prompt Hints**: In `-c` mode, automatically injects a prompt hint requesting a single fenced code block containing all code (`--no-hint` disables this).
 - **Exit Code Standards**:
   - `0`: Successful completion.
-  - `1`: General runtime error or missing authentication token.
-  - `2`: Invalid CLI arguments or non-existent file path.
+  - `1`: General runtime error, missing authentication token, or non-existent `-f` file path.
+  - `2`: Invalid CLI arguments.
   - `3`: No code block matched the requested `--lang` or `--code` filter.
 
 ### 2.5 Markdown Conversation Export
@@ -173,11 +174,11 @@ Implemented in `markdown.go`:
 Requests carry the following headers:
 - `Authorization: Bearer <token>`
 - `x-client-platform: web`
-- `x-client-version: 1.0.0`
+- `x-client-version: 2.8.0`
 - `x-client-bundle-id: com.deepseek.chat`
 - `x-client-locale: <derived locale, e.g. en_US>`
-- `x-client-timezone-offset: <offset minutes, e.g. -300>`
-- `x-device-id: <persistent UUID from ~/.config/deepseek.device_id>`
+- `x-client-timezone-offset: <offset seconds, e.g. -18000>`
+- `x-device-id: <persistent UUID from ~/.config/deepseek.device>`
 - `User-Agent: <derived system user agent>`
 - `Origin: https://chat.deepseek.com`
 - `Referer: https://chat.deepseek.com/`
@@ -190,6 +191,8 @@ Requests carry the following headers:
 ```
 deepseek-tui/
 ├── main.go                     # Entry point, TUI model/update/view, CLI flag parsing, stealth mode
+├── server.go                   # --serve HTTP server, OpenAI Chat Completions, tool parser, session cache
+├── server_protocols.go         # OpenAI Responses (/v1/responses) & Anthropic Messages (/v1/messages) adapters
 ├── api.go                      # HTTP client, PoW submission, SSE parser, file uploads, history export
 ├── clientenv.go                # Runtime device ID, locale, timezone, user-agent derivation
 ├── markdown.go                 # Terminal Markdown renderer, inline styling, tables, code fences
@@ -204,6 +207,7 @@ deepseek-tui/
     ├── main_test.go            # TUI state transitions, drag-and-drop parsing, hotkey toggles
     ├── markdown_test.go        # Markdown block parsing, styling, tables, render cache
     ├── pow_test.go             # Captured DeepSeekHashV1 vectors and challenge solving
+    ├── server_test.go          # OpenAI/Responses/Anthropic --serve endpoints, DSML/JSON tools, caching
     ├── stealth_test.go         # CLI flag parsing, code block extraction, language filtering
     └── e2e_test.go             # End-to-end binary execution with mock HTTP server
 ```
@@ -280,6 +284,8 @@ deepseek-tui
 | `-e, --export ID` | Export full conversation session as Markdown to stdout |
 | `--think` / `--no-think` | Enable or disable DeepThink reasoning mode |
 | `--search` / `--no-search` | Enable or disable Web Search retrieval |
+| `--serve [ADDR]` | Start local OpenAI / Responses / Anthropic API server (`127.0.0.1:8080`) |
+| `--serve-key KEY` | Require Bearer / `X-API-Key` for `--serve` requests |
 | `--token TOKEN` | DeepSeek userToken (overrides environment and config file) |
 | `-h, --help` | Display help and usage instructions |
 | `--version` | Print version information |

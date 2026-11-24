@@ -127,6 +127,8 @@ Control reasoning mode and web search retrieval:
 | `--no-think` | disable thinking / reasoning mode (default in CLI) |
 | `--search` | enable web search retrieval (default) |
 | `--no-search` | disable web search retrieval |
+| `--serve [ADDR]` | start local OpenAI / Responses / Anthropic API server (default `127.0.0.1:8080`) |
+| `--serve-key KEY` | require `Authorization: Bearer KEY` or `X-API-Key` for `--serve` |
 | `--token TOKEN` | DeepSeek web userToken (overrides env and config file) |
 | `-h, --help` | show usage help and exit |
 | `--version` | print version and exit |
@@ -155,6 +157,70 @@ Attach documents directly to queries in both TUI and CLI modes:
 - **TUI Command:** Type `/file <path> <optional prompt>` in the input box.
 - **CLI Mode:** Pass `-f <path> <prompt>`, or simply pass the file path as an
   argument (e.g. `./deepseek-tui ./report.pdf "summarize key points"`).
+
+## API server mode (`--serve`)
+
+Run `deepseek-tui` as a local HTTP server so OpenAI/Anthropic SDKs and coding
+agents (OpenCode, Codex CLI, Claude Code, Cline, Roo Code, Aider) can connect
+directly without an external proxy:
+
+```bash
+./deepseek-tui --serve 8080
+# or bind an explicit address and require a local API key:
+./deepseek-tui --serve 127.0.0.1:8080 --serve-key "local-secret"
+```
+
+Bare ports bind to `127.0.0.1` by default. `DEEPSEEK_SERVE_KEY` can also be
+used instead of `--serve-key`.
+
+### Supported endpoints
+
+- `GET /health` (`GET /healthz`) — liveness check (`{"status":"ok"}`)
+- `GET /v1/models` — lists `deepseek-chat`, `deepseek-reasoner`,
+  `deepseek-chat-search`, and `deepseek-reasoner-search`
+- `POST /v1/chat/completions` — OpenAI Chat Completions API (streaming SSE and
+  non-streaming JSON, `tools`/`functions`, `tool_choice`, `reasoning_content`,
+  `stop`, `stream_options.include_usage`, `web_search_options`)
+- `POST /v1/responses` — OpenAI Responses API (flattened `tools`,
+  `instructions`, `input` items, `previous_response_id`, streaming SSE events)
+- `POST /v1/messages` — Anthropic Messages API (`x-api-key`, `system`,
+  `input_schema` tools, `tool_use`/`tool_result` blocks, `thinking`, SSE events)
+
+### Tool calling & single-session continuity
+
+Because DeepSeek's web backend has no native `tools` field, `--serve` injects
+available tool schemas into the prompt and parses both `<tool_call>` JSON
+blocks and DeepSeek's native DSML tags (`<｜DSML｜...>` / `<｜｜DSML｜｜...>`)
+across split SSE chunks, emitting standard `tool_calls` / `function_call` /
+`tool_use` payloads.
+
+A prefix-matched in-memory session cache (`serveSessionCache`, plus
+`previous_response_id` state) tracks `(model, tools, messages[:k])` so
+multi-turn tool-calling loops stay inside the same server-side
+`chat_session_id` via `parent_message_id` instead of opening a new DeepSeek
+chat on every turn.
+
+### Example: OpenCode (`opencode.json`)
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "deepseek-local": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "DeepSeek Local",
+      "options": {
+        "baseURL": "http://127.0.0.1:8080/v1",
+        "apiKey": "local"
+      },
+      "models": {
+        "deepseek-chat": { "name": "DeepSeek Chat", "tools": true, "reasoning": false },
+        "deepseek-reasoner": { "name": "DeepSeek Reasoner", "tools": true, "reasoning": true }
+      }
+    }
+  }
+}
+```
 
 ## Token
 
@@ -295,12 +361,14 @@ a40318e6b7af56bf27cf_1790959021012_58595
 ## Layout
 
 ```
-main.go      Bubble Tea model/update/view, auth, text wrapping, styles
-markdown.go  Markdown parser, tables, code fences, styled wrapping, render cache
-clientenv.go per-install device id, locale, timezone, user agent, private files
-api.go       HTTP client, envelopes, PoW response header, SSE parser
-pow.go       Keccak-f[1600] 23-round permutation, DeepSeekHashV1, solver
-*_test.go    captured hash vectors, solver, envelope shapes, SSE protocols
+main.go             Bubble Tea model/update/view, auth, CLI mode, entry point
+server.go           --serve HTTP server, OpenAI Chat Completions, tool parser, session cache
+server_protocols.go OpenAI Responses (/v1/responses) & Anthropic Messages (/v1/messages) adapters
+markdown.go         Markdown parser, tables, code fences, styled wrapping, render cache
+clientenv.go        per-install device id, locale, timezone, user agent, private files
+api.go              HTTP client, envelopes, PoW response header, SSE parser
+pow.go              Keccak-f[1600] 23-round permutation, DeepSeekHashV1, solver
+test/*_test.go      captured hash vectors, solver, envelope shapes, SSE & server protocols
 ```
 
 ## CI and releases

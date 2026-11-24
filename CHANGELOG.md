@@ -4,6 +4,35 @@ All notable changes to this project are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Local API server mode (`--serve [ADDR]`, default `127.0.0.1:8080`, and
+  `--serve-key KEY` / `DEEPSEEK_SERVE_KEY`) enabling OpenAI/Anthropic SDKs and
+  coding agents (OpenCode, Codex CLI, Claude Code, Cline, Roo Code, Aider) to
+  connect directly.
+- Multi-protocol endpoints: `GET /health`, `GET /v1/models`,
+  `POST /v1/chat/completions` (OpenAI Chat Completions), `POST /v1/responses`
+  (OpenAI Responses API with `previous_response_id`), and `POST /v1/messages`
+  (Anthropic Messages API).
+- Virtual model routing for `deepseek-chat`, `deepseek-reasoner`,
+  `deepseek-chat-search`, and `deepseek-reasoner-search`, plus `web_search` tool
+  and `web_search_options` mapping.
+- Dual-format streaming and non-streaming tool-call parser supporting both
+  `<tool_call>` JSON blocks and DeepSeek's native DSML tags
+  (`<｜DSML｜...>` / `<｜｜DSML｜｜...>`) across split SSE chunks.
+- Prefix-matched session cache (`serveSessionCache`) and concurrency limiter so
+  multi-turn agent tool loops stay within one DeepSeek chat session.
+- Comprehensive unit and mock-upstream tests in `test/server_test.go`.
+
+### Fixed
+
+- `APIClient.Complete` (`api.go`) now detects HTTP `200 OK` JSON error payloads
+  (such as `40003 INVALID_TOKEN` or `40303 CHALLENGE_REQUIRED`) instead of
+  silently returning an empty completion, and `--serve` maps them to proper HTTP
+  error responses (`403` / `502`).
+
 ## [0.6.0] - 2026-11-20
 
 ### Added

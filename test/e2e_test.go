@@ -123,6 +123,8 @@ func TestCLIHelp(t *testing.T) {
 			"--no-think",
 			"--search",
 			"--no-search",
+			"--serve",
+			"--serve-key",
 			"--token",
 			"ctrl+d",
 			"ctrl+s",

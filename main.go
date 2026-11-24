@@ -1732,17 +1732,20 @@ func parseFileAndPrompt(input string) (string, string, bool) {
 }
 
 type stealthOptions struct {
-	prompt   string
-	token    string
-	codeOnly bool
-	first    bool
-	lang     string
-	filePath string
-	noHint   bool
-	help     bool
-	think    bool
-	noSearch bool
-	exportID string
+	prompt    string
+	token     string
+	codeOnly  bool
+	first     bool
+	lang      string
+	filePath  string
+	noHint    bool
+	help      bool
+	think     bool
+	noSearch  bool
+	exportID  string
+	serveMode bool
+	serveAddr string
+	serveKey  string
 }
 
 // parseStealthArgs accepts flags anywhere in the argument list and joins every
@@ -1847,6 +1850,36 @@ func parseStealthArgs(args []string) (stealthOptions, error) {
 			opts.token = strings.TrimPrefix(arg, "--token=")
 		case strings.HasPrefix(arg, "-token="):
 			opts.token = strings.TrimPrefix(arg, "-token=")
+		case arg == "--serve", arg == "-serve":
+			opts.serveMode = true
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				i++
+				opts.serveAddr = strings.TrimSpace(args[i])
+			} else {
+				opts.serveAddr = "8080"
+			}
+		case strings.HasPrefix(arg, "--serve="):
+			val := strings.TrimSpace(strings.TrimPrefix(arg, "--serve="))
+			if val == "" {
+				return opts, errors.New("--serve requires a port or host:port")
+			}
+			opts.serveMode = true
+			opts.serveAddr = val
+		case strings.HasPrefix(arg, "-serve="):
+			val := strings.TrimSpace(strings.TrimPrefix(arg, "-serve="))
+			if val == "" {
+				return opts, errors.New("--serve requires a port or host:port")
+			}
+			opts.serveMode = true
+			opts.serveAddr = val
+		case arg == "--serve-key":
+			if i+1 >= len(args) {
+				return opts, errors.New("--serve-key requires a value")
+			}
+			i++
+			opts.serveKey = args[i]
+		case strings.HasPrefix(arg, "--serve-key="):
+			opts.serveKey = strings.TrimPrefix(arg, "--serve-key=")
 		case strings.HasPrefix(arg, "-"):
 			return opts, fmt.Errorf("unknown flag %q", arg)
 		default:
@@ -2042,6 +2075,15 @@ func runStealthMode(args []string) int {
 		token = storedToken()
 	}
 
+	if opts.serveMode {
+		if token == "" {
+			fmt.Fprintln(os.Stderr, "deepseek-tui: no DeepSeek token found.")
+			fmt.Fprintln(os.Stderr, "Set DEEPSEEK_TOKEN, write "+tokenPath()+", or pass --token.")
+			return 1
+		}
+		return runServeMode(opts, token)
+	}
+
 	if opts.exportID != "" {
 		if token == "" {
 			fmt.Fprintln(os.Stderr, "deepseek-tui: no DeepSeek token found.")
@@ -2123,6 +2165,8 @@ flags:
       --no-think     disable thinking / reasoning mode (default in CLI)
       --search       enable web search retrieval (default)
       --no-search    disable web search retrieval
+      --serve [ADDR] start an OpenAI-compatible HTTP API server (default 127.0.0.1:8080)
+      --serve-key K  require Bearer/X-API-Key K for --serve requests
       --token TOKEN  DeepSeek web userToken (overrides env and config file)
   -h, --help         show this help
       --version      print version and exit

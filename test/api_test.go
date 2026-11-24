@@ -509,3 +509,33 @@ func TestUploadFile(t *testing.T) {
 		t.Fatal("expected error on directory, got nil")
 	}
 }
+
+func TestCompleteSurfacesHTTP200JSONChallengeError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/chat/create_pow_challenge":
+			fmt.Fprint(w, `{"code":0,"data":{"biz_data":{"algorithm":"DeepSeekHashV1","challenge":"168efa309e5a73033fc82dde4333bbc6515da440ef961574f73f99cbe7b397ad","salt":"a40318e6b7af56bf27cf","expire_at":1790959021012,"difficulty":144000,"signature":"sig","target_path":"/api/v0/chat/completion"}}}`)
+		case "/chat/completion":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, `{"code":40303,"msg":"CHALLENGE_REQUIRED","data":{"provider":"hcaptcha"}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewAPIClient("test-token")
+	client.baseURL = server.URL
+	err := client.Complete(context.Background(), CompletionRequest{
+		SessionID: "sess-1",
+		Prompt:    "hi",
+		FirstTurn: true,
+	}, CompletionHooks{})
+	if err == nil {
+		t.Fatal("expected error on HTTP 200 JSON CHALLENGE_REQUIRED payload, got nil")
+	}
+	if !strings.Contains(err.Error(), "40303") || !strings.Contains(err.Error(), "CHALLENGE_REQUIRED") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

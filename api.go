@@ -779,9 +779,49 @@ func (c *APIClient) Complete(ctx context.Context, req CompletionRequest, hooks C
 		return apiErrorFromBody(resp.StatusCode, body)
 	}
 
+	br := bufio.NewReaderSize(resp.Body, 64*1024)
+	if isJSONCompletionResponse(resp.Header.Get("Content-Type"), br) {
+		errBody, _ := io.ReadAll(io.LimitReader(br, 1<<20))
+		return completionJSONError(resp.StatusCode, errBody)
+	}
+
 	status("streaming")
 	parser := newStreamParser(hooks.OnEvent)
-	return readSSE(resp.Body, parser.handle)
+	return readSSE(br, parser.handle)
+}
+
+func isJSONCompletionResponse(contentType string, br *bufio.Reader) bool {
+	if strings.Contains(strings.ToLower(contentType), "application/json") {
+		return true
+	}
+	peek, _ := br.Peek(32)
+	for _, b := range peek {
+		switch b {
+		case ' ', '\t', '\r', '\n':
+			continue
+		case '{', '[':
+			return true
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+func completionJSONError(status int, body []byte) error {
+	var env apiEnvelope
+	if err := json.Unmarshal(body, &env); err == nil {
+		if env.Code != 0 {
+			return &APIError{Status: status, Code: env.Code, Message: env.Msg}
+		}
+		if len(env.Data) > 0 {
+			var unused any
+			if err := decodeEnvelopeData(body, env.Data, &unused); err != nil {
+				return err
+			}
+		}
+	}
+	return apiErrorFromBody(status, body)
 }
 
 // powResponseHeader builds the base64 JSON blob DeepSeek expects in
