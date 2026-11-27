@@ -1,6 +1,6 @@
 # deepseek-tui — Project Summary
 
-> Status snapshot: **2026-11-21** · Latest release: **v0.6.0** · Language: **Go 1.24+** · License: **MIT**
+> Status snapshot: **2026-11-26** · Latest release: **v0.7.0** · Language: **Go 1.24+** · License: **MIT**
 
 ## 1. Project at a glance
 
@@ -124,6 +124,7 @@ Implemented in `markdown.go`:
 
 | Tag | Date | Highlights |
 | --- | --- | --- |
+| `v0.7.0` | 2026-11-26 | Local OpenAI/Responses/Anthropic API server (`--serve`), streaming and non-streaming tool calling with DSML support, virtual model routing, session reuse, and HTTP 200 error-envelope detection |
 | `v0.6.0` | 2026-11-20 | File attachments (`/file/upload_file` PoW), terminal drag-and-drop auto-detection, reasoning & search toggles (`ctrl+d`, `ctrl+s`, `--think`, `--no-search`), stream cancellation (`esc`), markdown session export (`e`, `--export`), and dedicated `test/` suite |
 | `v0.5.1` | 2026-11-17 | Code extraction filters (`-1, --first`, `-l, --lang`), language aliases, prompt hint injection, and exit code 3 |
 | `v0.5.0` | 2026-11-17 | Non-interactive headless CLI mode (`deepseek-tui "prompt"`), code-only output (`-c, --code`), flexible flag placement |
@@ -137,6 +138,11 @@ Implemented in `markdown.go`:
 ---
 
 ## 4. Key fixes and evolutions
+
+### v0.7.0
+- **Local Agent API Server**: Added `--serve` with OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages endpoints, virtual DeepSeek model routing, and streaming/non-streaming tool-call parsing for both `<tool_call>` JSON and native DSML tags.
+- **Session and Concurrency Reuse**: Added a prefix-matched session cache and concurrency limiter so multi-turn agent tool loops remain within one DeepSeek chat session.
+- **HTTP 200 Error Detection**: `APIClient.Complete` now detects JSON error envelopes returned with `200 OK` and maps them to proper HTTP errors in server mode.
 
 ### v0.6.0
 - **File Upload Error Decoding**: Restructured `decodeEnvelopeData` so server business errors (`biz_code != 0`) are caught even when `biz_data` is null (e.g. unsupported file types).

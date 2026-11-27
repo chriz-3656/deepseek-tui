@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.0] - 2026-11-26
 
 ### Added
 
@@ -119,6 +119,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   history was rewritten to purge the embedded identifier; older clones must be
   re-cloned.
 
+[0.7.0]: https://github.com/chriz-3656/deepseek-tui/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/chriz-3656/deepseek-tui/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/chriz-3656/deepseek-tui/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/chriz-3656/deepseek-tui/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/chriz-3656/deepseek-tui/releases/tag/v0.4.0
