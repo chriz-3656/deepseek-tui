@@ -248,6 +248,8 @@ On every push to `main` and version tag (`v*`):
 ## 8. Verification performed
 
 - **CI Automation**:
+  - Workflow run `45940966167`: `v0.7.0` release assets published.
+  - Workflow run `45940966206`: `main` CI passed completely across `tidy`, `vet`, `test`, `build`, and `smoke`.
   - Workflow run `44751313565`: `v0.6.0` release assets published.
   - Workflow run `44771940889`: `main` CI passed completely across `tidy`, `vet`, `test`, `build`, and `smoke`.
 - **Test Suite Coverage**:
